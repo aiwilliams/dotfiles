@@ -34,3 +34,6 @@ esac
 mkdir -p "$HOME/.local/bin"
 ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
 echo "Symlinked db-worktree to ~/.local/bin/db-worktree"
+
+# Symlink AGENTS.md to AI tool config directories
+source "$SCRIPT_DIR/lib/agents.sh"
