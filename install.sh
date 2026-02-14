@@ -17,6 +17,7 @@ if [ ! -f "$SSH_KEY" ]; then
   echo ""
 fi
 
+# Platform-specific system packages + postgres
 case "$(uname -s)" in
   Linux)
     "$SCRIPT_DIR/install-ubuntu.sh"
@@ -29,6 +30,12 @@ case "$(uname -s)" in
     exit 1
     ;;
 esac
+
+# mise (node, pnpm)
+source "$SCRIPT_DIR/lib/mise.sh"
+
+# AI coding tools (claude, codex)
+source "$SCRIPT_DIR/lib/ai-tools.sh"
 
 # Symlink db-worktree CLI to ~/.local/bin
 mkdir -p "$HOME/.local/bin"
