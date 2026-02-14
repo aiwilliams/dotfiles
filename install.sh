@@ -29,3 +29,8 @@ case "$(uname -s)" in
     exit 1
     ;;
 esac
+
+# Symlink db-worktree CLI to ~/.local/bin
+mkdir -p "$HOME/.local/bin"
+ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
+echo "Symlinked db-worktree to ~/.local/bin/db-worktree"

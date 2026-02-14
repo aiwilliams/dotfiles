@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# db-worktree — CLI tool for per-worktree PostgreSQL database isolation.
+#
+# Usage:
+#   db-worktree create <branch>           Create empty DBs + user
+#   db-worktree clone <branch> [source]   Clone DBs from source (default: main)
+#   db-worktree drop <branch>             Drop DBs + user
+#   db-worktree list                      List all worktree databases
+#   db-worktree env <branch>              Print .env vars for a branch
+#   db-worktree status <branch>            Show status of a branch's DBs
+#   db-worktree init-main                 Shortcut: create main branch DBs
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
+
+# shellcheck source=../lib/postgres.sh
+source "$LIB_DIR/postgres.sh"
+
+usage() {
+  cat <<EOF
+Usage: db-worktree <command> [args]
+
+Commands:
+  create <branch>           Create empty DBs + user for a branch
+  clone <branch> [source]   Clone DBs from source branch (default: main)
+  drop <branch>             Drop DBs + user for a branch
+  list                      List all worktree databases
+  env <branch>              Print .env vars for a branch
+  status <branch>           Show status of a branch's DBs (user, sizes, extensions)
+  init-main                 Shortcut: create main branch DBs
+EOF
+  exit 1
+}
+
+cmd_create() {
+  local branch="${1:?Error: branch name required}"
+  pg_create_worktree_dbs "$branch"
+  echo ""
+  echo "Environment variables for your .env:"
+  echo "--------------------------------------"
+  pg_generate_env_urls "$branch"
+}
+
+cmd_clone() {
+  local branch="${1:?Error: branch name required}"
+  local source="${2:-main}"
+  pg_clone_worktree_dbs "$branch" "$source"
+  echo ""
+  echo "Environment variables for your .env:"
+  echo "--------------------------------------"
+  pg_generate_env_urls "$branch"
+}
+
+cmd_drop() {
+  local branch="${1:?Error: branch name required}"
+  local sanitized
+  sanitized=$(pg_sanitize_branch_name "$branch")
+
+  if [[ "$sanitized" == "main" ]]; then
+    read -rp "Are you sure you want to drop the 'main' databases? [y/N] " confirm
+    if [[ "$confirm" != [yY] ]]; then
+      echo "Aborted."
+      exit 1
+    fi
+  fi
+
+  pg_drop_worktree_dbs "$branch"
+}
+
+cmd_list() {
+  pg_list_worktree_dbs
+}
+
+cmd_env() {
+  local branch="${1:?Error: branch name required}"
+  pg_generate_env_urls "$branch"
+}
+
+cmd_status() {
+  local branch="${1:?Error: branch name required}"
+  pg_status_worktree_dbs "$branch"
+}
+
+cmd_init_main() {
+  pg_create_worktree_dbs "main"
+  echo ""
+  echo "Environment variables for your .env:"
+  echo "--------------------------------------"
+  pg_generate_env_urls "main"
+}
+
+# --- Main dispatch ---
+
+[[ $# -lt 1 ]] && usage
+
+command="$1"
+shift
+
+case "$command" in
+  create)    cmd_create "$@" ;;
+  clone)     cmd_clone "$@" ;;
+  drop)      cmd_drop "$@" ;;
+  list)      cmd_list ;;
+  env)       cmd_env "$@" ;;
+  status)    cmd_status "$@" ;;
+  init-main) cmd_init_main ;;
+  *)         echo "Unknown command: $command"; usage ;;
+esac
