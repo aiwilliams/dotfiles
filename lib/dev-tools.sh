@@ -11,7 +11,7 @@ fi
 echo "Installing dev tools..."
 
 # Claude Code (native install)
-curl -fsSL https://claude.ai/install.sh | sh
+curl -fsSL https://claude.ai/install.sh | bash
 
 # Codex
 npm install -g @openai/codex@latest
