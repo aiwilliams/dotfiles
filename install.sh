@@ -43,5 +43,8 @@ ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
 ln -sf "$SCRIPT_DIR/bin/wt" "$HOME/.local/bin/wt"
 echo "Symlinked db-worktree and wt to ~/.local/bin/"
 
+# Claude Code MCP servers
+source "$SCRIPT_DIR/lib/claude-mcp.sh"
+
 # Symlink AGENTS.md to AI tool config directories
 source "$SCRIPT_DIR/lib/agents.sh"
