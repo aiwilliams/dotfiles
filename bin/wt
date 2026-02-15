@@ -153,8 +153,92 @@ Commands:
   remove [N|wtN]             Remove worktree and drop DBs (interactive picker if no arg)
   list                       List all worktrees with ID, branch, port, and status
   switch                     Interactive worktree switcher (requires fzf)
+  help                       Show detailed documentation
 EOF
   exit 1
+}
+
+cmd_help() {
+  cat <<'EOF'
+wt — Git worktree manager with per-worktree database isolation.
+
+OVERVIEW
+
+  wt automates creating, managing, and removing git worktrees with isolated
+  PostgreSQL databases and unique dev-server ports. Each worktree gets an
+  auto-incrementing identifier (wt1, wt2, ...) that serves as the stable key
+  for its directory, databases, and port. Gaps are filled: if wt1 and wt3
+  exist, the next worktree gets wt2.
+
+THE wtN NUMBERING SYSTEM
+
+  Everything derives from the worktree number N:
+
+    Directory   ../<repo>-wt<N>     e.g. ../myapp-wt1
+    Databases   <repo>_wt<N>_*      e.g. myapp_wt1_dev, myapp_wt1_test
+    Port        3000 + N            e.g. 3001 for wt1, 3002 for wt2
+    .env        PORT, POSTGRES_*, NEXT_PUBLIC_SITE_URL are set automatically
+
+COMMANDS
+
+  wt create [--branch <name>]
+
+    Create a new worktree with the next available wtN identifier. Without
+    --branch, the worktree is created in detached HEAD state. With --branch,
+    it checks out or creates that branch, copies .env from main, clones
+    databases, and runs scripts/setup.sh if present.
+
+    Examples:
+      wt create                       # detached worktree at next wtN
+      wt create --branch my-feature   # worktree on branch my-feature
+
+  wt checkout
+
+    Interactive picker (requires gh + fzf) that lists your remote branches
+    with open PRs that aren't already checked out as worktrees. Selecting a
+    branch runs wt create --branch <name> for you.
+
+  wt remove [N|wtN]
+
+    Remove a worktree and drop its databases. Accepts a number (3) or
+    identifier (wt3). With no argument, opens an fzf picker.
+
+    Examples:
+      wt remove 2     # remove wt2
+      wt remove wt2   # same thing
+      wt remove        # interactive picker
+
+  wt list
+
+    Show all worktrees with their ID, directory, branch, port, dirty status,
+    and commit hash.
+
+  wt switch
+
+    Interactive fzf picker to select a worktree and print its path. Useful
+    with cd: cd $(wt switch)
+
+  wt help
+
+    Show this documentation.
+
+COMPANION TOOL: db-worktree
+
+  db-worktree manages PostgreSQL databases independently of git worktrees.
+  wt calls it automatically during create/remove, but you can use it directly
+  for lower-level database operations.
+
+  db-worktree subcommands:
+    create <id>           Create empty DBs + user
+    clone <id> [source]   Clone DBs from source (default: main)
+    drop <id>             Drop DBs + user
+    list                  List all worktree databases
+    env <id>              Print .env connection vars
+    status <id>           Show DB sizes, user, extensions
+    init-main             Create main branch DBs (first-time setup)
+
+  wt create calls db-worktree clone; wt remove calls db-worktree drop.
+EOF
 }
 
 cmd_create() {
@@ -496,7 +580,7 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
   exit 1
 fi
 
-[[ $# -lt 1 ]] && usage
+[[ $# -lt 1 ]] && { cmd_help; exit 0; }
 
 command="$1"
 shift
@@ -507,5 +591,6 @@ case "$command" in
   remove)   cmd_remove "$@" ;;
   list)     cmd_list ;;
   switch)   cmd_switch ;;
+  help)     cmd_help ;;
   *)        echo "Unknown command: $command"; usage ;;
 esac
