@@ -8,6 +8,7 @@ Creates worktrees as sibling directories named `<repo>-<branch>`. Automatically 
 
 ```
 wt create <branch>         # Create worktree + clone DBs + wire .env + run setup
+wt checkout                # Pick from your remote branches (via gh) to check out as a worktree
 wt remove <branch>         # Remove worktree + drop DBs + delete merged branch
 wt list                    # List all worktrees with branch, dirty status, commit
 wt switch                  # Interactive fzf worktree switcher

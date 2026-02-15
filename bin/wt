@@ -3,6 +3,7 @@
 #
 # Usage:
 #   wt create <branch>         Create worktree + branch, clone DBs, set up .env
+#   wt checkout                Pick a remote branch (yours) to check out as a worktree
 #   wt remove <branch>         Remove worktree + drop DBs
 #   wt list                    List all worktrees with status
 #   wt switch                  Interactive worktree switcher (requires fzf)
@@ -88,6 +89,7 @@ Usage: wt <command> [args]
 
 Commands:
   create <branch>         Create worktree, clone DBs from main, wire .env
+  checkout                Pick a remote branch (yours) to check out as a worktree
   remove <branch>         Remove worktree and drop DBs
   list                    List all worktrees with branch and status
   switch                  Interactive worktree switcher (requires fzf)
@@ -144,6 +146,91 @@ cmd_create() {
 
   echo ""
   echo -e "${BOLD}Ready!${NC} cd $wt_dir"
+}
+
+cmd_checkout() {
+  if ! command -v gh &>/dev/null; then
+    echo -e "${RED}gh CLI is required. Install it first.${NC}"
+    exit 1
+  fi
+
+  if ! command -v fzf &>/dev/null; then
+    echo -e "${RED}fzf is required for interactive selection.${NC}"
+    exit 1
+  fi
+
+  # Get current GitHub username
+  local gh_user
+  gh_user=$(gh api user --jq '.login' 2>/dev/null) || {
+    echo -e "${RED}Not authenticated with gh. Run 'gh auth login' first.${NC}"
+    exit 1
+  }
+
+  echo -e "${BOLD}Fetching your remote branches...${NC}"
+  git fetch --prune origin > /dev/null 2>&1
+
+  # Get branches already checked out in worktrees
+  local wt_branches
+  wt_branches=$(git worktree list --porcelain | awk '/^branch / { sub(/^refs\/heads\//, "", $2); print $2 }')
+
+  # List remote branches where the latest commit is authored by the current user,
+  # excluding branches already in a worktree and HEAD
+  local branches
+  branches=$(
+    git for-each-ref \
+      --sort=-committerdate \
+      --format='%(refname:short)|%(authorname)|%(authoremail)|%(committerdate:relative)|%(subject)' \
+      refs/remotes/origin/ \
+    | grep -v '^origin/HEAD' \
+    | while IFS='|' read -r ref author email date subject; do
+        local branch="${ref#origin/}"
+
+        # Skip branches already in a worktree
+        if echo "$wt_branches" | grep -qx "$branch"; then
+          continue
+        fi
+
+        # Check if the branch's PR author matches (via gh) or the commit author matches
+        # Use email matching against gh user
+        echo "${branch}|${date}|${subject}"
+      done
+  )
+
+  # Filter to branches owned by the GitHub user using gh pr list
+  local pr_branches
+  pr_branches=$(gh pr list --author "@me" --state all --limit 100 --json headRefName --jq '.[].headRefName' 2>/dev/null)
+
+  # Build the selectable list: branches that have a PR by this user
+  local selectable
+  selectable=$(
+    echo "$branches" | while IFS='|' read -r branch date subject; do
+      [[ -z "$branch" ]] && continue
+      if echo "$pr_branches" | grep -qx "$branch"; then
+        printf "%-40s %-20s %s\n" "$branch" "$date" "$subject"
+      fi
+    done
+  )
+
+  if [[ -z "$selectable" ]]; then
+    echo -e "${YELLOW}No remote branches found with your PRs that aren't already worktrees.${NC}"
+    exit 0
+  fi
+
+  # Let user pick
+  local selection
+  selection=$(echo "$selectable" | fzf --prompt="Check out branch: " --header="BRANCH                                   UPDATED              SUBJECT") || exit 0
+
+  local branch
+  branch=$(echo "$selection" | awk '{print $1}')
+
+  if [[ -z "$branch" ]]; then
+    echo "No branch selected."
+    exit 0
+  fi
+
+  echo ""
+  # Reuse cmd_create which handles: worktree add, db clone, .env, setup
+  cmd_create "$branch"
 }
 
 cmd_remove() {
@@ -245,9 +332,10 @@ command="$1"
 shift
 
 case "$command" in
-  create) cmd_create "$@" ;;
-  remove) cmd_remove "$@" ;;
-  list)   cmd_list ;;
-  switch) cmd_switch ;;
-  *)      echo "Unknown command: $command"; usage ;;
+  create)   cmd_create "$@" ;;
+  checkout) cmd_checkout ;;
+  remove)   cmd_remove "$@" ;;
+  list)     cmd_list ;;
+  switch)   cmd_switch ;;
+  *)        echo "Unknown command: $command"; usage ;;
 esac
