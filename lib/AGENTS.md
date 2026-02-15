@@ -1,14 +1,23 @@
-# Per-Worktree PostgreSQL Databases
+# Worktree & Database Management
 
-Local development uses native PostgreSQL 18 with pgvector (not Docker). Each git worktree gets isolated databases and a dedicated user via `db-worktree` (`~/dotfiles/bin/db-worktree`).
+Local development uses native PostgreSQL 18 with pgvector (not Docker). Two CLI tools in `~/dotfiles/bin/` manage worktrees and databases.
 
-## Database Naming
+## `wt` — Git Worktree Manager
 
-Branch names are sanitized: lowercased, non-alphanumeric replaced with `_`, collapsed, truncated to 50 chars. Example: `feature/cool-thing` becomes `feature_cool_thing`.
+Creates worktrees as sibling directories named `<repo>-<branch>`. Automatically clones databases, wires `.env`, and runs project setup.
 
-Each branch gets: `platform_<sanitized>`, `vector_<sanitized>`, and a user named `<sanitized>` (password = username).
+```
+wt create <branch>         # Create worktree + clone DBs + wire .env + run setup
+wt remove <branch>         # Remove worktree + drop DBs + delete merged branch
+wt list                    # List all worktrees with branch, dirty status, commit
+wt switch                  # Interactive fzf worktree switcher
+```
 
-## Commands
+`wt create` does the full flow: `git worktree add`, clones DBs from main, copies `.env` from the main worktree, replaces `POSTGRES_*` vars with per-branch values, and runs `scripts/setup.sh`.
+
+## `db-worktree` — Database Manager
+
+Lower-level tool for managing per-worktree PostgreSQL databases directly.
 
 ```
 db-worktree create <branch>           # Create empty DBs + user
@@ -20,9 +29,15 @@ db-worktree env <branch>              # Print .env vars
 db-worktree init-main                 # Create main branch DBs
 ```
 
+## Database Naming
+
+Branch names are sanitized: lowercased, non-alphanumeric replaced with `_`, collapsed, truncated to 50 chars. Example: `feature/cool-thing` becomes `feature_cool_thing`.
+
+Each branch gets: `platform_<sanitized>`, `vector_<sanitized>`, and a user named `<sanitized>` (password = username). Both databases use port 5432 (single PG instance).
+
 ## Wiring into .env
 
-Run `db-worktree env <branch>` and copy the output into `apps/platform/.env`. The output matches the `POSTGRES_*` and `POSTGRES_VECTOR_*` variables from `.env.example`. Both databases use port 5432 (single PG instance), unlike the old Docker setup which had vector on 5434.
+The `POSTGRES_*` and `POSTGRES_VECTOR_*` variables in `apps/platform/.env` match `.env.example` format. `wt create` handles this automatically. For manual use, run `db-worktree env <branch>`.
 
 ## Library
 

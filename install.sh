@@ -40,7 +40,8 @@ source "$SCRIPT_DIR/lib/ai-tools.sh"
 # Symlink db-worktree CLI to ~/.local/bin
 mkdir -p "$HOME/.local/bin"
 ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
-echo "Symlinked db-worktree to ~/.local/bin/db-worktree"
+ln -sf "$SCRIPT_DIR/bin/wt" "$HOME/.local/bin/wt"
+echo "Symlinked db-worktree and wt to ~/.local/bin/"
 
 # Symlink AGENTS.md to AI tool config directories
 source "$SCRIPT_DIR/lib/agents.sh"

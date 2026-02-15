@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# wt — Git worktree manager with per-worktree database isolation.
+#
+# Usage:
+#   wt create <branch>         Create worktree + branch, clone DBs, set up .env
+#   wt remove <branch>         Remove worktree + drop DBs
+#   wt list                    List all worktrees with status
+#   wt switch                  Interactive worktree switcher (requires fzf)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
+
+# shellcheck source=../lib/postgres.sh
+source "$LIB_DIR/postgres.sh"
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+# Get the main worktree directory for the current repo
+main_worktree_dir() {
+  git worktree list --porcelain | grep '^worktree ' | head -1 | sed 's/^worktree //'
+}
+
+# Get the repo base name (directory name of the main worktree)
+repo_name() {
+  basename "$(main_worktree_dir)"
+}
+
+# Compute the worktree directory path: sibling of main worktree, named <repo>-<branch>
+worktree_dir_for() {
+  local branch="$1"
+  local sanitized
+  sanitized=$(pg_sanitize_branch_name "$branch")
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  echo "$(dirname "$main_dir")/$(repo_name)-${sanitized}"
+}
+
+# Get the .env file path within a worktree
+env_file_for() {
+  echo "$1/apps/platform/.env"
+}
+
+# Update POSTGRES_* vars in a .env file with per-worktree values.
+# Preserves all non-POSTGRES lines. If no .env exists, creates one from the env vars alone.
+write_env_vars() {
+  local env_file="$1"
+  local branch="$2"
+  local env_vars
+  env_vars=$(pg_generate_env_urls "$branch")
+
+  if [[ -f "$env_file" ]]; then
+    # Remove existing POSTGRES_* lines, then append new ones
+    local tmp
+    tmp=$(mktemp)
+    grep -v '^POSTGRES_' "$env_file" > "$tmp" || true
+    # Remove trailing blank lines
+    sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
+    echo "" >> "$tmp"
+    echo "$env_vars" >> "$tmp"
+    mv "$tmp" "$env_file"
+  else
+    mkdir -p "$(dirname "$env_file")"
+    echo "$env_vars" > "$env_file"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Colors
+# --------------------------------------------------------------------------
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+usage() {
+  cat <<EOF
+Usage: wt <command> [args]
+
+Commands:
+  create <branch>         Create worktree, clone DBs from main, wire .env
+  remove <branch>         Remove worktree and drop DBs
+  list                    List all worktrees with branch and status
+  switch                  Interactive worktree switcher (requires fzf)
+EOF
+  exit 1
+}
+
+cmd_create() {
+  local branch="${1:?Error: branch name required}"
+  local wt_dir
+  wt_dir=$(worktree_dir_for "$branch")
+  local main_dir
+  main_dir=$(main_worktree_dir)
+
+  if [[ -d "$wt_dir" ]]; then
+    echo -e "${RED}Worktree already exists:${NC} $wt_dir"
+    exit 1
+  fi
+
+  echo -e "${BOLD}Creating worktree for '${branch}'${NC}"
+  echo ""
+
+  # Create git worktree with a new branch
+  echo -e "${GREEN}Git worktree:${NC} $wt_dir"
+  git worktree add "$wt_dir" -b "$branch" 2>/dev/null \
+    || git worktree add "$wt_dir" "$branch"
+
+  # Clone databases from main
+  echo ""
+  pg_clone_worktree_dbs "$branch"
+
+  # Copy .env from main worktree and update POSTGRES vars
+  local main_env
+  main_env=$(env_file_for "$main_dir")
+  local wt_env
+  wt_env=$(env_file_for "$wt_dir")
+
+  if [[ -f "$main_env" ]]; then
+    mkdir -p "$(dirname "$wt_env")"
+    cp "$main_env" "$wt_env"
+    echo ""
+    echo -e "${GREEN}Copied .env from main worktree${NC}"
+  fi
+
+  write_env_vars "$wt_env" "$branch"
+  echo -e "${GREEN}Updated POSTGRES_* vars in .env${NC}"
+
+  # Run project setup if available
+  if [[ -f "$wt_dir/scripts/setup.sh" ]]; then
+    echo ""
+    echo -e "${BOLD}Running project setup...${NC}"
+    (cd "$wt_dir" && ROOT_WORKTREE_PATH="$main_dir" bash scripts/setup.sh)
+  fi
+
+  echo ""
+  echo -e "${BOLD}Ready!${NC} cd $wt_dir"
+}
+
+cmd_remove() {
+  local branch="${1:?Error: branch name required}"
+  local sanitized
+  sanitized=$(pg_sanitize_branch_name "$branch")
+  local wt_dir
+  wt_dir=$(worktree_dir_for "$branch")
+
+  if [[ "$sanitized" == "main" ]]; then
+    echo -e "${RED}Cannot remove the main worktree.${NC}"
+    exit 1
+  fi
+
+  echo -e "${BOLD}Removing worktree for '${branch}'${NC}"
+  echo ""
+
+  # Remove git worktree
+  if git worktree list --porcelain | grep -q "^worktree ${wt_dir}$"; then
+    echo -e "${YELLOW}Removing worktree:${NC} $wt_dir"
+    git worktree remove "$wt_dir" --force
+  else
+    echo "Worktree directory not found, skipping git worktree remove."
+    # Clean up directory if it exists but isn't a registered worktree
+    if [[ -d "$wt_dir" ]]; then
+      rm -rf "$wt_dir"
+    fi
+  fi
+
+  # Drop databases
+  echo ""
+  pg_drop_worktree_dbs "$branch"
+
+  # Delete the branch if it's fully merged
+  if git branch --list "$branch" | grep -q "$branch"; then
+    if git branch --merged main | grep -q "$branch"; then
+      git branch -d "$branch" 2>/dev/null && echo -e "${GREEN}Deleted merged branch '${branch}'${NC}"
+    else
+      echo -e "${YELLOW}Branch '${branch}' is not merged into main, keeping it.${NC}"
+    fi
+  fi
+
+  echo ""
+  echo -e "${BOLD}Done.${NC}"
+}
+
+cmd_list() {
+  local main_dir
+  main_dir=$(main_worktree_dir)
+
+  printf "${BOLD}%-40s %-25s %-10s %s${NC}\n" "DIRECTORY" "BRANCH" "STATUS" "COMMIT"
+
+  git worktree list --porcelain | awk '
+    /^worktree / { wt = $2 }
+    /^HEAD /     { commit = substr($2, 1, 7) }
+    /^branch /   { branch = $2; sub(/^refs\/heads\//, "", branch) }
+    /^$/ {
+      if (wt != "") {
+        # Check for dirty state
+        cmd = "git -C " wt " status --porcelain 2>/dev/null | head -1"
+        cmd | getline dirty
+        close(cmd)
+        status = (dirty != "") ? "*" : ""
+        printf "%-40s %-25s %-10s %s\n", wt, branch, status, commit
+      }
+      wt = ""; commit = ""; branch = ""; dirty = ""
+    }
+  '
+}
+
+cmd_switch() {
+  if ! command -v fzf &>/dev/null; then
+    echo "fzf is required for interactive switching. Install it or use 'cd' directly."
+    echo ""
+    cmd_list
+    exit 1
+  fi
+
+  local selection
+  selection=$(git worktree list | fzf --prompt="Switch to worktree: " | awk '{print $1}')
+
+  if [[ -n "$selection" ]]; then
+    echo "$selection"
+    cd "$selection" || exit 1
+  fi
+}
+
+# --- Main dispatch ---
+
+# Ensure we're in a git repo
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+  echo "Error: not in a git repository."
+  exit 1
+fi
+
+[[ $# -lt 1 ]] && usage
+
+command="$1"
+shift
+
+case "$command" in
+  create) cmd_create "$@" ;;
+  remove) cmd_remove "$@" ;;
+  list)   cmd_list ;;
+  switch) cmd_switch ;;
+  *)      echo "Unknown command: $command"; usage ;;
+esac
