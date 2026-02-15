@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # wt — Git worktree manager with per-worktree database isolation.
 #
+# Uses auto-incrementing wtN identifiers as stable keys for directories,
+# databases, and ports. Branches are optional metadata.
+#
 # Usage:
-#   wt create <branch>         Create worktree + branch, clone DBs, set up .env
-#   wt checkout                Pick a remote branch (yours) to check out as a worktree
-#   wt remove <branch>         Remove worktree + drop DBs
-#   wt list                    List all worktrees with status
-#   wt switch                  Interactive worktree switcher (requires fzf)
+#   wt create [--branch <name>]   Create worktree with auto-numbered ID
+#   wt checkout                   Pick a remote branch (yours) to check out as a worktree
+#   wt remove [N|wtN]             Remove worktree + drop DBs (fzf picker if no arg)
+#   wt list                       List all worktrees with status
+#   wt switch                     Interactive worktree switcher (requires fzf)
 
 set -euo pipefail
 
@@ -30,42 +33,99 @@ repo_name() {
   basename "$(main_worktree_dir)"
 }
 
-# Compute the worktree directory path: sibling of main worktree, named <repo>-<branch>
-worktree_dir_for() {
-  local branch="$1"
-  local sanitized
-  sanitized=$(pg_sanitize_branch_name "$branch")
-  local main_dir
-  main_dir=$(main_worktree_dir)
-  echo "$(dirname "$main_dir")/$(repo_name)-${sanitized}"
-}
-
 # Get the .env file path within a worktree
 env_file_for() {
   echo "$1/apps/platform/.env"
 }
 
-# Update POSTGRES_* vars in a .env file with per-worktree values.
-# Preserves all non-POSTGRES lines. If no .env exists, creates one from the env vars alone.
+# Scan sibling directories matching <repo>-wt[0-9]* and return the lowest
+# unused positive integer. Fills gaps: if wt1 and wt3 exist, returns 2.
+next_worktree_number() {
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  local parent_dir
+  parent_dir=$(dirname "$main_dir")
+  local repo
+  repo=$(repo_name)
+
+  # Collect all in-use numbers
+  local -a used=()
+  for dir in "$parent_dir/${repo}"-wt[0-9]*; do
+    [[ -d "$dir" ]] || continue
+    local name
+    name=$(basename "$dir")
+    local num="${name#"${repo}-wt"}"
+    if [[ "$num" =~ ^[0-9]+$ ]]; then
+      used+=("$num")
+    fi
+  done
+
+  # Find the lowest unused positive integer
+  local n=1
+  while true; do
+    local found=false
+    for u in "${used[@]+"${used[@]}"}"; do
+      if [[ "$u" -eq "$n" ]]; then
+        found=true
+        break
+      fi
+    done
+    if [[ "$found" == false ]]; then
+      echo "$n"
+      return
+    fi
+    ((n++))
+  done
+}
+
+# Compute the worktree directory path for a given number
+worktree_dir_for_number() {
+  local n="$1"
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  echo "$(dirname "$main_dir")/$(repo_name)-wt${n}"
+}
+
+# Compute port from worktree number: 3000 + N
+compute_port() {
+  local n="$1"
+  local port=$((3000 + n))
+  if [[ "$port" -gt 65535 ]]; then
+    echo -e "${RED}Port ${port} exceeds 65535${NC}" >&2
+    exit 1
+  fi
+  echo "$port"
+}
+
+# Update POSTGRES_*, PORT, and NEXT_PUBLIC_SITE_URL in a .env file.
+# Preserves all other lines. If no .env exists, creates one from the env vars alone.
 write_env_vars() {
   local env_file="$1"
-  local branch="$2"
+  local wt_identifier="$2"
+  local port="$3"
   local env_vars
-  env_vars=$(pg_generate_env_urls "$branch")
+  env_vars=$(pg_generate_env_urls "$wt_identifier")
 
   if [[ -f "$env_file" ]]; then
-    # Remove existing POSTGRES_* lines, then append new ones
     local tmp
     tmp=$(mktemp)
-    grep -v '^POSTGRES_' "$env_file" > "$tmp" || true
+    grep -v '^POSTGRES_\|^PORT=\|^NEXT_PUBLIC_SITE_URL=' "$env_file" > "$tmp" || true
     # Remove trailing blank lines
     sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
+    echo "" >> "$tmp"
+    echo "PORT=${port}" >> "$tmp"
+    echo "NEXT_PUBLIC_SITE_URL=http://localhost:${port}" >> "$tmp"
     echo "" >> "$tmp"
     echo "$env_vars" >> "$tmp"
     mv "$tmp" "$env_file"
   else
     mkdir -p "$(dirname "$env_file")"
-    echo "$env_vars" > "$env_file"
+    {
+      echo "PORT=${port}"
+      echo "NEXT_PUBLIC_SITE_URL=http://localhost:${port}"
+      echo ""
+      echo "$env_vars"
+    } > "$env_file"
   fi
 }
 
@@ -88,40 +148,65 @@ usage() {
 Usage: wt <command> [args]
 
 Commands:
-  create <branch>         Create worktree, clone DBs from main, wire .env
-  checkout                Pick a remote branch (yours) to check out as a worktree
-  remove <branch>         Remove worktree and drop DBs
-  list                    List all worktrees with branch and status
-  switch                  Interactive worktree switcher (requires fzf)
+  create [--branch <name>]   Create worktree with auto-numbered ID, optionally on a branch
+  checkout                   Pick a remote branch (yours) to check out as a worktree
+  remove [N|wtN]             Remove worktree and drop DBs (interactive picker if no arg)
+  list                       List all worktrees with ID, branch, port, and status
+  switch                     Interactive worktree switcher (requires fzf)
 EOF
   exit 1
 }
 
 cmd_create() {
-  local branch="${1:?Error: branch name required}"
-  local wt_dir
-  wt_dir=$(worktree_dir_for "$branch")
+  local branch=""
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --branch)
+        branch="${2:?Error: --branch requires a name}"
+        shift 2
+        ;;
+      *)
+        echo -e "${RED}Unknown argument: $1${NC}"
+        usage
+        ;;
+    esac
+  done
+
   local main_dir
   main_dir=$(main_worktree_dir)
+  local n
+  n=$(next_worktree_number)
+  local wt_id="wt${n}"
+  local wt_dir
+  wt_dir=$(worktree_dir_for_number "$n")
+  local port
+  port=$(compute_port "$n")
 
-  if [[ -d "$wt_dir" ]]; then
-    echo -e "${RED}Worktree already exists:${NC} $wt_dir"
-    exit 1
+  if [[ -n "$branch" ]]; then
+    echo -e "${BOLD}Creating worktree ${wt_id} for branch '${branch}'${NC}"
+  else
+    echo -e "${BOLD}Creating worktree ${wt_id} (detached)${NC}"
   fi
-
-  echo -e "${BOLD}Creating worktree for '${branch}'${NC}"
   echo ""
 
-  # Create git worktree with a new branch
+  # Create git worktree
   echo -e "${GREEN}Git worktree:${NC} $wt_dir"
-  git worktree add "$wt_dir" -b "$branch" 2>/dev/null \
-    || git worktree add "$wt_dir" "$branch"
+  if [[ -n "$branch" ]]; then
+    git fetch origin "$branch" 2>/dev/null || true
+    git worktree add "$wt_dir" "$branch" 2>/dev/null \
+      || git worktree add "$wt_dir" "origin/$branch" 2>/dev/null \
+      || git worktree add "$wt_dir" -b "$branch"
+  else
+    git worktree add "$wt_dir" --detach
+  fi
 
   # Clone databases from main
   echo ""
-  pg_clone_worktree_dbs "$branch"
+  pg_clone_worktree_dbs "$wt_id"
 
-  # Copy .env from main worktree and update POSTGRES vars
+  # Copy .env from main worktree and update vars
   local main_env
   main_env=$(env_file_for "$main_dir")
   local wt_env
@@ -134,17 +219,16 @@ cmd_create() {
     echo -e "${GREEN}Copied .env from main worktree${NC}"
   fi
 
-  write_env_vars "$wt_env" "$branch"
-  echo -e "${GREEN}Updated POSTGRES_* vars in .env${NC}"
+  write_env_vars "$wt_env" "$wt_id" "$port"
+  echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_SITE_URL in .env${NC}"
 
-  # Track branch in Graphite if gt is available
-  if command -v gt &>/dev/null; then
+  # Track branch in Graphite if --branch was provided and gt is available
+  if [[ -n "$branch" ]] && command -v gt &>/dev/null; then
     echo ""
     echo -e "${BOLD}Tracking branch in Graphite...${NC}"
-    # Look up the PR's base branch from GitHub to get the correct parent
-    local pr_base
+    local pr_base=""
     if command -v gh &>/dev/null; then
-      pr_base=$(gh pr view "$branch" --json baseRefName --jq '.baseRefName' 2>/dev/null)
+      pr_base=$(gh pr view "$branch" --json baseRefName --jq '.baseRefName' 2>/dev/null) || true
     fi
     if [[ -n "${pr_base:-}" ]]; then
       echo -e "  PR targets: ${pr_base}"
@@ -194,8 +278,7 @@ cmd_checkout() {
   local wt_branches
   wt_branches=$(git worktree list --porcelain | awk '/^branch / { sub(/^refs\/heads\//, "", $2); print $2 }')
 
-  # List remote branches where the latest commit is authored by the current user,
-  # excluding branches already in a worktree and HEAD
+  # List remote branches excluding those already in a worktree and HEAD
   local branches
   branches=$(
     git for-each-ref \
@@ -211,8 +294,6 @@ cmd_checkout() {
           continue
         fi
 
-        # Check if the branch's PR author matches (via gh) or the commit author matches
-        # Use email matching against gh user
         echo "${branch}|${date}|${subject}"
       done
   )
@@ -250,23 +331,73 @@ cmd_checkout() {
   fi
 
   echo ""
-  # Reuse cmd_create which handles: worktree add, db clone, .env, setup
-  cmd_create "$branch"
+  cmd_create --branch "$branch"
 }
 
 cmd_remove() {
-  local branch="${1:?Error: branch name required}"
-  local sanitized
-  sanitized=$(pg_sanitize_branch_name "$branch")
-  local wt_dir
-  wt_dir=$(worktree_dir_for "$branch")
+  local arg="${1:-}"
+  local n=""
 
-  if [[ "$sanitized" == "main" ]]; then
-    echo -e "${RED}Cannot remove the main worktree.${NC}"
-    exit 1
+  if [[ -z "$arg" ]]; then
+    # Interactive picker
+    if ! command -v fzf &>/dev/null; then
+      echo -e "${RED}fzf is required for interactive selection, or pass a worktree number.${NC}"
+      exit 1
+    fi
+
+    local main_dir
+    main_dir=$(main_worktree_dir)
+    local repo
+    repo=$(repo_name)
+
+    # Build a list of wtN worktrees for the picker
+    local entries=""
+    git worktree list --porcelain | awk '
+      /^worktree / { wt = $2 }
+      /^branch /   { branch = $2; sub(/^refs\/heads\//, "", branch) }
+      /^$/ {
+        if (wt != "") print wt "|" branch
+        wt = ""; branch = ""
+      }
+    ' | while IFS='|' read -r wt_path branch; do
+      local dir_name
+      dir_name=$(basename "$wt_path")
+      # Only show wtN worktrees, not main
+      if [[ "$dir_name" =~ ^${repo}-wt([0-9]+)$ ]]; then
+        local wt_num="${BASH_REMATCH[1]}"
+        printf "wt%-4s %-40s %s\n" "$wt_num" "$wt_path" "${branch:-(detached)}"
+      fi
+    done > /tmp/wt_remove_list.$$ || true
+
+    if [[ ! -s /tmp/wt_remove_list.$$ ]]; then
+      echo -e "${YELLOW}No worktrees to remove.${NC}"
+      rm -f /tmp/wt_remove_list.$$
+      exit 0
+    fi
+
+    local selection
+    selection=$(cat /tmp/wt_remove_list.$$ | fzf --prompt="Remove worktree: " --header="ID     DIRECTORY                                 BRANCH") || {
+      rm -f /tmp/wt_remove_list.$$
+      exit 0
+    }
+    rm -f /tmp/wt_remove_list.$$
+
+    n=$(echo "$selection" | awk '{print $1}' | sed 's/^wt//')
+  else
+    # Parse arg: accept "3" or "wt3"
+    n="${arg#wt}"
+    if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+      echo -e "${RED}Invalid worktree identifier: ${arg}${NC}"
+      echo "Usage: wt remove [N|wtN]"
+      exit 1
+    fi
   fi
 
-  echo -e "${BOLD}Removing worktree for '${branch}'${NC}"
+  local wt_id="wt${n}"
+  local wt_dir
+  wt_dir=$(worktree_dir_for_number "$n")
+
+  echo -e "${BOLD}Removing worktree ${wt_id}${NC}"
   echo ""
 
   # Remove git worktree
@@ -274,25 +405,15 @@ cmd_remove() {
     echo -e "${YELLOW}Removing worktree:${NC} $wt_dir"
     git worktree remove "$wt_dir" --force
   else
-    echo "Worktree directory not found, skipping git worktree remove."
-    # Clean up directory if it exists but isn't a registered worktree
+    echo "Worktree directory not found in git, skipping git worktree remove."
     if [[ -d "$wt_dir" ]]; then
       rm -rf "$wt_dir"
     fi
   fi
 
-  # Drop databases
+  # Drop databases and user
   echo ""
-  pg_drop_worktree_dbs "$branch"
-
-  # Delete the branch if it's fully merged
-  if git branch --list "$branch" | grep -q "$branch"; then
-    if git branch --merged main | grep -q "$branch"; then
-      git branch -d "$branch" 2>/dev/null && echo -e "${GREEN}Deleted merged branch '${branch}'${NC}"
-    else
-      echo -e "${YELLOW}Branch '${branch}' is not merged into main, keeping it.${NC}"
-    fi
-  fi
+  pg_drop_worktree_dbs "$wt_id"
 
   echo ""
   echo -e "${BOLD}Done.${NC}"
@@ -301,13 +422,16 @@ cmd_remove() {
 cmd_list() {
   local main_dir
   main_dir=$(main_worktree_dir)
+  local repo
+  repo=$(repo_name)
 
-  printf "${BOLD}%-40s %-25s %-10s %s${NC}\n" "DIRECTORY" "BRANCH" "STATUS" "COMMIT"
+  printf "${BOLD}%-6s %-40s %-25s %-8s %-10s %s${NC}\n" "ID" "DIRECTORY" "BRANCH" "PORT" "STATUS" "COMMIT"
 
-  git worktree list --porcelain | awk '
+  git worktree list --porcelain | awk -v main_dir="$main_dir" -v repo="$repo" '
     /^worktree / { wt = $2 }
     /^HEAD /     { commit = substr($2, 1, 7) }
     /^branch /   { branch = $2; sub(/^refs\/heads\//, "", branch) }
+    /^detached/  { branch = "(detached)" }
     /^$/ {
       if (wt != "") {
         # Check for dirty state
@@ -315,7 +439,32 @@ cmd_list() {
         cmd | getline dirty
         close(cmd)
         status = (dirty != "") ? "*" : ""
-        printf "%-40s %-25s %-10s %s\n", wt, branch, status, commit
+
+        dir_name = wt
+        sub(/.*\//, "", dir_name)
+
+        if (wt == main_dir) {
+          id = "main"
+          port = "3000"
+        } else {
+          # Check if this is a wtN-style worktree
+          pattern = repo "-wt"
+          if (index(dir_name, pattern) == 1) {
+            num = substr(dir_name, length(pattern) + 1)
+            if (num ~ /^[0-9]+$/) {
+              id = "wt" num
+              port = 3000 + num
+            } else {
+              id = "?"
+              port = "?"
+            }
+          } else {
+            id = "old"
+            port = "?"
+          }
+        }
+
+        printf "%-6s %-40s %-25s %-8s %-10s %s\n", id, wt, branch, port, status, commit
       }
       wt = ""; commit = ""; branch = ""; dirty = ""
     }
