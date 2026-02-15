@@ -137,6 +137,27 @@ cmd_create() {
   write_env_vars "$wt_env" "$branch"
   echo -e "${GREEN}Updated POSTGRES_* vars in .env${NC}"
 
+  # Track branch in Graphite if gt is available
+  if command -v gt &>/dev/null; then
+    echo ""
+    echo -e "${BOLD}Tracking branch in Graphite...${NC}"
+    # Look up the PR's base branch from GitHub to get the correct parent
+    local pr_base
+    if command -v gh &>/dev/null; then
+      pr_base=$(gh pr view "$branch" --json baseRefName --jq '.baseRefName' 2>/dev/null)
+    fi
+    if [[ -n "${pr_base:-}" ]]; then
+      echo -e "  PR targets: ${pr_base}"
+      (cd "$wt_dir" && git rebase "origin/${pr_base}" 2>/dev/null; gt branch track --force --parent "$pr_base" 2>/dev/null) \
+        && echo -e "${GREEN}Tracked in Graphite (parent: ${pr_base})${NC}" \
+        || echo -e "${YELLOW}Graphite tracking skipped${NC}"
+    else
+      (cd "$wt_dir" && gt branch track --force 2>/dev/null) \
+        && echo -e "${GREEN}Tracked in Graphite${NC}" \
+        || echo -e "${YELLOW}Graphite tracking skipped (no PR found, used nearest ancestor)${NC}"
+    fi
+  fi
+
   # Run project setup if available
   if [[ -f "$wt_dir/scripts/setup.sh" ]]; then
     echo ""
