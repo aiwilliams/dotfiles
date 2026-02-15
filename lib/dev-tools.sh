@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dev-tools.sh — Install npm-based dev tools (Claude Code, Codex, Graphite).
+# dev-tools.sh — Install dev tools (Claude Code, Codex, Graphite).
 
 set -euo pipefail
 
@@ -10,8 +10,10 @@ fi
 
 echo "Installing dev tools..."
 
-# AI coding tools
-npm install -g @anthropic-ai/claude-code@latest
+# Claude Code (native install)
+curl -fsSL https://claude.ai/install.sh | sh
+
+# Codex
 npm install -g @openai/codex@latest
 
 # Graphite (stacked PRs)
