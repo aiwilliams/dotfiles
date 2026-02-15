@@ -34,8 +34,8 @@ esac
 # mise (node, pnpm)
 source "$SCRIPT_DIR/lib/mise.sh"
 
-# AI coding tools (claude, codex)
-source "$SCRIPT_DIR/lib/ai-tools.sh"
+# Dev tools (claude, codex, graphite)
+source "$SCRIPT_DIR/lib/dev-tools.sh"
 
 # Symlink db-worktree CLI to ~/.local/bin
 mkdir -p "$HOME/.local/bin"

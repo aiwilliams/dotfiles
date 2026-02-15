@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "Running macOS setup..."
 
-brew install tmux
+brew install tmux gh
 
 # --- PostgreSQL 18 + pgvector via Homebrew ---
 

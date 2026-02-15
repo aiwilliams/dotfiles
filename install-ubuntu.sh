@@ -10,6 +10,19 @@ echo "Running Ubuntu setup..."
 sudo apt-get update -y
 sudo apt-get install -y tmux keychain build-essential python3 curl ca-certificates
 
+# --- GitHub CLI ---
+
+if ! command -v gh &>/dev/null; then
+  echo "Installing GitHub CLI..."
+  sudo mkdir -p -m 755 /etc/apt/keyrings
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+  sudo apt-get update -y
+  sudo apt-get install -y gh
+fi
+
 # --- PostgreSQL 18 + pgvector ---
 
 echo "Installing PostgreSQL 18 + pgvector..."
