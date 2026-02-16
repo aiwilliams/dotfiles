@@ -98,35 +98,31 @@ compute_port() {
 }
 
 # Update POSTGRES_*, PORT, and NEXT_PUBLIC_SITE_URL in a .env file.
-# Preserves all other lines. If no .env exists, creates one from the env vars alone.
+# Delegates POSTGRES_* handling to pg_apply_env, then layers on PORT and site URL.
 write_env_vars() {
   local env_file="$1"
   local wt_identifier="$2"
   local port="$3"
-  local env_vars
-  env_vars=$(pg_generate_env_urls "$wt_identifier")
 
+  # Strip PORT and NEXT_PUBLIC_SITE_URL if the file exists (pg_apply_env handles POSTGRES_*)
   if [[ -f "$env_file" ]]; then
     local tmp
     tmp=$(mktemp)
-    grep -v '^POSTGRES_\|^PORT=\|^NEXT_PUBLIC_SITE_URL=' "$env_file" > "$tmp" || true
-    # Remove trailing blank lines
+    grep -v '^PORT=\|^NEXT_PUBLIC_SITE_URL=' "$env_file" > "$tmp" || true
     sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
     echo "" >> "$tmp"
     echo "PORT=${port}" >> "$tmp"
     echo "NEXT_PUBLIC_SITE_URL=http://localhost:${port}" >> "$tmp"
-    echo "" >> "$tmp"
-    echo "$env_vars" >> "$tmp"
     mv "$tmp" "$env_file"
   else
     mkdir -p "$(dirname "$env_file")"
     {
       echo "PORT=${port}"
       echo "NEXT_PUBLIC_SITE_URL=http://localhost:${port}"
-      echo ""
-      echo "$env_vars"
     } > "$env_file"
   fi
+
+  pg_apply_env "$env_file" "$wt_identifier"
 }
 
 # --------------------------------------------------------------------------

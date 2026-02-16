@@ -7,6 +7,7 @@
 #   db-worktree drop <branch>             Drop DBs + user
 #   db-worktree list                      List all worktree databases
 #   db-worktree env <branch>              Print .env vars for a branch
+#   db-worktree apply <branch> <env-file> Update POSTGRES_* vars in a .env file
 #   db-worktree status <branch>            Show status of a branch's DBs
 #   db-worktree init-main                 Shortcut: create main branch DBs
 
@@ -28,6 +29,7 @@ Commands:
   drop <branch>             Drop DBs + user for a branch
   list                      List all worktree databases
   env <branch>              Print .env vars for a branch
+  apply <branch> <env-file> Update POSTGRES_* vars in a .env file
   status <branch>           Show status of a branch's DBs (user, sizes, extensions)
   init-main                 Shortcut: create main branch DBs
 EOF
@@ -78,6 +80,13 @@ cmd_env() {
   pg_generate_env_urls "$branch"
 }
 
+cmd_apply() {
+  local branch="${1:?Error: branch name required}"
+  local env_file="${2:?Error: .env file path required}"
+  pg_apply_env "$env_file" "$branch"
+  echo "Updated POSTGRES_* vars in $env_file for branch '$branch'"
+}
+
 cmd_status() {
   local branch="${1:?Error: branch name required}"
   pg_status_worktree_dbs "$branch"
@@ -104,6 +113,7 @@ case "$command" in
   drop)      cmd_drop "$@" ;;
   list)      cmd_list ;;
   env)       cmd_env "$@" ;;
+  apply)     cmd_apply "$@" ;;
   status)    cmd_status "$@" ;;
   init-main) cmd_init_main ;;
   *)         echo "Unknown command: $command"; usage ;;
