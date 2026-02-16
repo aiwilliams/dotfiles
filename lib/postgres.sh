@@ -52,7 +52,7 @@ pg_create_user() {
     return 0
   fi
   echo "Creating user '$username'..."
-  pg_exec "CREATE USER \"$username\" WITH LOGIN CREATEDB PASSWORD '$username';"
+  pg_exec "CREATE USER \"$username\" WITH LOGIN CREATEDB SUPERUSER PASSWORD '$username';"
 }
 
 pg_create_db() {
