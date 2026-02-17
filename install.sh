@@ -36,6 +36,14 @@ source "$SCRIPT_DIR/lib/mise.sh"
 # Dev tools (claude, codex, graphite)
 source "$SCRIPT_DIR/lib/dev-tools.sh"
 
+# Shell environment variables
+if ! grep -qF "NX_TUI" "$HOME/.bashrc"; then
+  echo '' >> "$HOME/.bashrc"
+  echo '# Disable Nx TUI (incompatible with non-interactive shells)' >> "$HOME/.bashrc"
+  echo 'export NX_TUI=false' >> "$HOME/.bashrc"
+  echo "Added NX_TUI=false to ~/.bashrc"
+fi
+
 # Symlink db-worktree CLI to ~/.local/bin
 mkdir -p "$HOME/.local/bin"
 ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
