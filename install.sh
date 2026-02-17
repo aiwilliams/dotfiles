@@ -4,14 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 git config --global init.defaultBranch main
-if [ -z "$(git config --global user.name)" ]; then
-  read -rp "Git user name: " git_name
-  git config --global user.name "$git_name"
-fi
-if [ -z "$(git config --global user.email)" ]; then
-  read -rp "Git email: " git_email
-  git config --global user.email "$git_email"
-fi
 
 SSH_KEY="$HOME/.ssh/id_ed25519_$(hostname)"
 if [ ! -f "$SSH_KEY" ]; then
