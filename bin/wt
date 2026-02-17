@@ -5,7 +5,8 @@
 # databases, and ports. Branches are optional metadata.
 #
 # Usage:
-#   wt create [--branch <name>]   Create worktree with auto-numbered ID
+#   wt create <branch>            Create worktree with auto-numbered ID on a branch
+#   wt create --detach            Create worktree in detached HEAD state
 #   wt checkout                   Pick a remote branch (yours) to check out as a worktree
 #   wt remove [N|wtN]             Remove worktree + drop DBs (fzf picker if no arg)
 #   wt list                       List all worktrees with status
@@ -144,7 +145,7 @@ usage() {
 Usage: wt <command> [args]
 
 Commands:
-  create [--branch <name>]   Create worktree with auto-numbered ID, optionally on a branch
+  create <branch>            Create worktree on a branch (or --detach for detached HEAD)
   checkout                   Pick a remote branch (yours) to check out as a worktree
   remove [N|wtN]             Remove worktree and drop DBs (interactive picker if no arg)
   list                       List all worktrees with ID, branch, port, and status
@@ -177,16 +178,17 @@ THE wtN NUMBERING SYSTEM
 
 COMMANDS
 
-  wt create [--branch <name>]
+  wt create <branch>
+  wt create --detach
 
-    Create a new worktree with the next available wtN identifier. Without
-    --branch, the worktree is created in detached HEAD state. With --branch,
-    it checks out or creates that branch, copies .env from main, clones
-    databases, and runs scripts/setup.sh if present.
+    Create a new worktree with the next available wtN identifier. A branch
+    name is required — the worktree checks out or creates that branch, copies
+    .env from main, clones databases, and runs scripts/setup.sh if present.
+    Use --detach for the rare case of a detached HEAD worktree.
 
     Examples:
-      wt create                       # detached worktree at next wtN
-      wt create --branch my-feature   # worktree on branch my-feature
+      wt create my-feature   # worktree on branch my-feature
+      wt create --detach     # detached worktree at next wtN
 
   wt checkout
 
@@ -239,23 +241,43 @@ EOF
 
 cmd_create() {
   local branch=""
+  local detach=false
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --branch)
-        branch="${2:?Error: --branch requires a name}"
-        shift 2
+      --detach)
+        detach=true
+        shift
+        ;;
+      -*)
+        echo -e "${RED}Unknown option: $1${NC}"
+        usage
         ;;
       *)
-        echo -e "${RED}Unknown argument: $1${NC}"
-        usage
+        if [[ -n "$branch" ]]; then
+          echo -e "${RED}Unexpected argument: $1${NC}"
+          usage
+        fi
+        branch="$1"
+        shift
         ;;
     esac
   done
 
-  local main_dir
-  main_dir=$(main_worktree_dir)
+  if [[ -z "$branch" ]] && [[ "$detach" == false ]]; then
+    echo -e "${RED}Error: branch name required${NC}"
+    echo ""
+    echo "Usage: wt create <branch>        Create worktree on a branch"
+    echo "       wt create --detach        Create worktree in detached HEAD state"
+    exit 1
+  fi
+
+  if [[ -n "$branch" ]] && [[ "$detach" == true ]]; then
+    echo -e "${RED}Error: cannot specify both a branch and --detach${NC}"
+    exit 1
+  fi
+
   local n
   n=$(next_worktree_number)
   local wt_id="wt${n}"
@@ -264,41 +286,31 @@ cmd_create() {
   local port
   port=$(compute_port "$n")
 
-  if [[ -n "$branch" ]]; then
-    echo -e "${BOLD}Creating worktree ${wt_id} for branch '${branch}'${NC}"
-  else
+  if [[ "$detach" == true ]]; then
     echo -e "${BOLD}Creating worktree ${wt_id} (detached)${NC}"
+  else
+    echo -e "${BOLD}Creating worktree ${wt_id} for branch '${branch}'${NC}"
   fi
   echo ""
 
   # Create git worktree
   echo -e "${GREEN}Git worktree:${NC} $wt_dir"
-  if [[ -n "$branch" ]]; then
+  if [[ "$detach" == true ]]; then
+    git worktree add "$wt_dir" --detach
+  else
     git fetch origin "$branch" 2>/dev/null || true
     git worktree add "$wt_dir" "$branch" 2>/dev/null \
       || git worktree add "$wt_dir" "origin/$branch" 2>/dev/null \
       || git worktree add "$wt_dir" -b "$branch"
-  else
-    git worktree add "$wt_dir" --detach
   fi
 
   # Clone databases from main
   echo ""
   pg_clone_worktree_dbs "$wt_id"
 
-  # Copy .env from main worktree and update vars
-  local main_env
-  main_env=$(env_file_for "$main_dir")
+  # Update .env with worktree-specific vars (setup.sh copies .env from main via post-checkout hook)
   local wt_env
   wt_env=$(env_file_for "$wt_dir")
-
-  if [[ -f "$main_env" ]]; then
-    mkdir -p "$(dirname "$wt_env")"
-    cp "$main_env" "$wt_env"
-    echo ""
-    echo -e "${GREEN}Copied .env from main worktree${NC}"
-  fi
-
   write_env_vars "$wt_env" "$wt_id" "$port"
   echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_SITE_URL in .env${NC}"
 
@@ -322,13 +334,6 @@ cmd_create() {
     fi
   fi
 
-  # Run project setup if available
-  if [[ -f "$wt_dir/scripts/setup.sh" ]]; then
-    echo ""
-    echo -e "${BOLD}Running project setup...${NC}"
-    (cd "$wt_dir" && ROOT_WORKTREE_PATH="$main_dir" bash scripts/setup.sh)
-  fi
-
   echo ""
   echo -e "${BOLD}Ready!${NC} cd $wt_dir"
 }
@@ -344,9 +349,8 @@ cmd_checkout() {
     exit 1
   fi
 
-  # Get current GitHub username
-  local gh_user
-  gh_user=$(gh api user --jq '.login' 2>/dev/null) || {
+  # Verify gh authentication
+  gh api user --jq '.login' 2>/dev/null > /dev/null || {
     echo -e "${RED}Not authenticated with gh. Run 'gh auth login' first.${NC}"
     exit 1
   }
@@ -366,7 +370,7 @@ cmd_checkout() {
       --format='%(refname:short)|%(authorname)|%(authoremail)|%(committerdate:relative)|%(subject)' \
       refs/remotes/origin/ \
     | grep -v '^origin/HEAD' \
-    | while IFS='|' read -r ref author email date subject; do
+    | while IFS='|' read -r ref _author _email date subject; do
         local branch="${ref#origin/}"
 
         # Skip branches already in a worktree
@@ -431,7 +435,6 @@ cmd_remove() {
     repo=$(repo_name)
 
     # Build a list of wtN worktrees for the picker
-    local entries=""
     git worktree list --porcelain | awk '
       /^worktree / { wt = $2 }
       /^branch /   { branch = $2; sub(/^refs\/heads\//, "", branch) }
