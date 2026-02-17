@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pre-commit hook: secrets detection + shellcheck
+
+failed=0
+
+# --- Secrets detection ---
+
+secret_patterns=(
+  'sk-[A-Za-z0-9]{20,}'
+  'AKIA[0-9A-Z]{16}'
+  'ghp_[A-Za-z0-9]{36,}'
+  'xox[bpras]-[A-Za-z0-9-]+'
+  '(SECRET|TOKEN|PASSWORD|API_KEY|PRIVATE_KEY)\s*=\s*[^\s]+'
+  '/home/[a-zA-Z0-9_-]+/'
+  '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+)
+
+while IFS= read -r file; do
+  content="$(git show ":$file" 2>/dev/null)" || continue
+  for pattern in "${secret_patterns[@]}"; do
+    if echo "$content" | grep -qEi "$pattern"; then
+      echo "BLOCKED: Potential secret or personal data in $file (pattern: $pattern)"
+      failed=1
+    fi
+  done
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+# --- Shellcheck ---
+
+if command -v shellcheck &>/dev/null; then
+  while IFS= read -r file; do
+    should_check=0
+
+    case "$file" in
+      *.sh) should_check=1 ;;
+      bin/*)
+        # Check for bash shebang
+        first_line="$(git show ":$file" 2>/dev/null | head -n1)" || continue
+        if [[ "$first_line" == *bash* ]]; then
+          should_check=1
+        fi
+        ;;
+    esac
+
+    if [ "$should_check" -eq 1 ]; then
+      if ! git show ":$file" | shellcheck -S warning -; then
+        echo "shellcheck failed: $file"
+        failed=1
+      fi
+    fi
+  done < <(git diff --cached --name-only --diff-filter=ACM)
+else
+  echo "Note: shellcheck not installed, skipping lint"
+fi
+
+exit "$failed"

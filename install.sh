@@ -4,7 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 git config --global init.defaultBranch main
-git config --global user.name "Adam Williams"
+if [ -z "$(git config --global user.name)" ]; then
+  read -rp "Git user name: " git_name
+  git config --global user.name "$git_name"
+fi
+if [ -z "$(git config --global user.email)" ]; then
+  read -rp "Git email: " git_email
+  git config --global user.email "$git_email"
+fi
 
 SSH_KEY="$HOME/.ssh/id_ed25519_$(hostname)"
 if [ ! -f "$SSH_KEY" ]; then
@@ -42,6 +49,10 @@ mkdir -p "$HOME/.local/bin"
 ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
 ln -sf "$SCRIPT_DIR/bin/wt" "$HOME/.local/bin/wt"
 echo "Symlinked db-worktree and wt to ~/.local/bin/"
+
+# Pre-commit hook
+ln -sf "$SCRIPT_DIR/hooks/pre-commit" "$SCRIPT_DIR/.git/hooks/pre-commit"
+echo "Installed pre-commit hook"
 
 # Claude Code MCP servers
 source "$SCRIPT_DIR/lib/claude-mcp.sh"

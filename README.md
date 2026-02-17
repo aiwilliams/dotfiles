@@ -1,6 +1,6 @@
 # dotfiles
 
-Personal system configuration for Ubuntu and macOS.
+System configuration for Ubuntu and macOS.
 
 ## Usage
 
@@ -12,8 +12,9 @@ Personal system configuration for Ubuntu and macOS.
 
 **All platforms (`install.sh`):**
 - Sets git default branch to `main`
-- Sets git user name
+- Prompts for git identity if not configured
 - Generates a per-host SSH key (`~/.ssh/id_ed25519_<hostname>`) if one doesn't exist
+- Installs a pre-commit hook with secrets detection and shellcheck
 
 **Ubuntu (`install-ubuntu.sh`):**
 - Installs tmux and keychain
