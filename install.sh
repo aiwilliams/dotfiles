@@ -3,8 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-git config --global init.defaultBranch main
-
 SSH_KEY="$HOME/.ssh/id_ed25519_$(hostname)"
 if [ ! -f "$SSH_KEY" ]; then
   echo "Generating SSH key: $SSH_KEY"
@@ -39,26 +37,5 @@ source "$SCRIPT_DIR/lib/dev-tools.sh"
 # Neovim (LazyVim)
 source "$SCRIPT_DIR/lib/neovim.sh"
 
-# Shell environment variables
-if ! grep -qF "NX_TUI" "$HOME/.bashrc"; then
-  echo '' >> "$HOME/.bashrc"
-  echo '# Disable Nx TUI (incompatible with non-interactive shells)' >> "$HOME/.bashrc"
-  echo 'export NX_TUI=false' >> "$HOME/.bashrc"
-  echo "Added NX_TUI=false to ~/.bashrc"
-fi
-
-# Symlink db-worktree CLI to ~/.local/bin
-mkdir -p "$HOME/.local/bin"
-ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
-ln -sf "$SCRIPT_DIR/bin/wt" "$HOME/.local/bin/wt"
-echo "Symlinked db-worktree and wt to ~/.local/bin/"
-
-# Pre-commit hook
-ln -sf "$SCRIPT_DIR/hooks/pre-commit" "$SCRIPT_DIR/.git/hooks/pre-commit"
-echo "Installed pre-commit hook"
-
-# Claude Code MCP servers
-source "$SCRIPT_DIR/lib/claude-mcp.sh"
-
-# Symlink AGENTS.md to AI tool config directories
-source "$SCRIPT_DIR/lib/agents.sh"
+# Shell config, symlinks, hooks
+source "$SCRIPT_DIR/configure.sh"
