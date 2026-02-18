@@ -8,7 +8,7 @@ echo "Running Ubuntu setup..."
 # --- System packages ---
 
 sudo apt-get update -y
-sudo apt-get install -y tmux keychain build-essential python3 curl ca-certificates fzf neovim shellcheck
+sudo apt-get install -y tmux keychain build-essential python3 curl ca-certificates fzf shellcheck
 
 # --- GitHub CLI ---
 

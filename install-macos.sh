@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "Running macOS setup..."
 
-brew install tmux gh fzf neovim shellcheck
+brew install tmux gh fzf shellcheck
 
 # --- PostgreSQL 18 + pgvector via Homebrew ---
 
@@ -13,7 +13,7 @@ brew install postgresql@18 pgvector
 brew services start postgresql@18
 
 echo "Waiting for PostgreSQL to start..."
-for i in {1..30}; do
+for _ in {1..30}; do
   if pg_isready -p 5432 > /dev/null 2>&1; then
     break
   fi

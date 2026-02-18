@@ -36,6 +36,9 @@ source "$SCRIPT_DIR/lib/mise.sh"
 # Dev tools (claude, codex, graphite)
 source "$SCRIPT_DIR/lib/dev-tools.sh"
 
+# Neovim (LazyVim)
+source "$SCRIPT_DIR/lib/neovim.sh"
+
 # Shell environment variables
 if ! grep -qF "NX_TUI" "$HOME/.bashrc"; then
   echo '' >> "$HOME/.bashrc"
