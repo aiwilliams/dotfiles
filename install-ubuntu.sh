@@ -10,6 +10,15 @@ echo "Running Ubuntu setup..."
 sudo apt-get update -y
 sudo apt-get install -y tmux keychain build-essential python3 curl ca-certificates fzf shellcheck
 
+# --- Kernel tuning ---
+
+SYSCTL_INOTIFY="/etc/sysctl.d/60-inotify.conf"
+if [ ! -f "$SYSCTL_INOTIFY" ]; then
+  echo "Increasing inotify watch limit..."
+  echo "fs.inotify.max_user_watches=524288" | sudo tee "$SYSCTL_INOTIFY" > /dev/null
+  sudo sysctl --system
+fi
+
 # --- GitHub CLI ---
 
 if ! command -v gh &>/dev/null; then
