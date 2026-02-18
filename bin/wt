@@ -98,28 +98,32 @@ compute_port() {
   echo "$port"
 }
 
-# Update POSTGRES_*, PORT, and NEXT_PUBLIC_SITE_URL in a .env file.
-# Delegates POSTGRES_* handling to pg_apply_env, then layers on PORT and site URL.
+# Update POSTGRES_*, PORT, NEXT_PUBLIC_HOST, and NEXT_PUBLIC_SITE_URL in a .env file.
+# Delegates POSTGRES_* handling to pg_apply_env, then layers on PORT, host, and site URL.
 write_env_vars() {
   local env_file="$1"
   local wt_identifier="$2"
   local port="$3"
+  local host
+  host=$(hostname)
 
-  # Strip PORT and NEXT_PUBLIC_SITE_URL if the file exists (pg_apply_env handles POSTGRES_*)
+  # Strip managed vars if the file exists (pg_apply_env handles POSTGRES_*)
   if [[ -f "$env_file" ]]; then
     local tmp
     tmp=$(mktemp)
-    grep -v '^PORT=\|^NEXT_PUBLIC_SITE_URL=' "$env_file" > "$tmp" || true
+    grep -v '^PORT=\|^NEXT_PUBLIC_HOST=\|^NEXT_PUBLIC_SITE_URL=' "$env_file" > "$tmp" || true
     sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
     echo "" >> "$tmp"
     echo "PORT=${port}" >> "$tmp"
-    echo "NEXT_PUBLIC_SITE_URL=https://$(hostname):${port}" >> "$tmp"
+    echo "NEXT_PUBLIC_HOST=${host}" >> "$tmp"
+    echo "NEXT_PUBLIC_SITE_URL=https://${host}:${port}" >> "$tmp"
     mv "$tmp" "$env_file"
   else
     mkdir -p "$(dirname "$env_file")"
     {
       echo "PORT=${port}"
-      echo "NEXT_PUBLIC_SITE_URL=https://$(hostname):${port}"
+      echo "NEXT_PUBLIC_HOST=${host}"
+      echo "NEXT_PUBLIC_SITE_URL=https://${host}:${port}"
     } > "$env_file"
   fi
 
@@ -174,7 +178,7 @@ THE wtN NUMBERING SYSTEM
     Directory   ../<repo>-wt<N>     e.g. ../myapp-wt1
     Databases   <repo>_wt<N>_*      e.g. myapp_wt1_dev, myapp_wt1_test
     Port        3000 + N            e.g. 3001 for wt1, 3002 for wt2
-    .env        PORT, POSTGRES_*, NEXT_PUBLIC_SITE_URL are set automatically
+    .env        PORT, POSTGRES_*, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL are set automatically
 
 COMMANDS
 
@@ -312,7 +316,7 @@ cmd_create() {
   local wt_env
   wt_env=$(env_file_for "$wt_dir")
   write_env_vars "$wt_env" "$wt_id" "$port"
-  echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_SITE_URL in .env${NC}"
+  echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL in .env${NC}"
 
   # Track branch in Graphite if --branch was provided and gt is available
   if [[ -n "$branch" ]] && command -v gt &>/dev/null; then
