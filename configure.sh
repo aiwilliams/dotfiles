@@ -28,6 +28,11 @@ ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
 ln -sf "$SCRIPT_DIR/bin/wt" "$HOME/.local/bin/wt"
 echo "Symlinked db-worktree and wt to ~/.local/bin/"
 
+# tmux config
+mkdir -p "$HOME/.config/tmux"
+ln -sf "$SCRIPT_DIR/config/tmux/tmux.conf" "$HOME/.config/tmux/tmux.conf"
+echo "Symlinked tmux.conf to ~/.config/tmux/"
+
 # Pre-commit hook
 ln -sf "$SCRIPT_DIR/hooks/pre-commit" "$SCRIPT_DIR/.git/hooks/pre-commit"
 echo "Installed pre-commit hook"
