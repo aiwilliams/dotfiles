@@ -113,13 +113,13 @@ write_env_vars() {
     sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
     echo "" >> "$tmp"
     echo "PORT=${port}" >> "$tmp"
-    echo "NEXT_PUBLIC_SITE_URL=http://localhost:${port}" >> "$tmp"
+    echo "NEXT_PUBLIC_SITE_URL=https://$(hostname):${port}" >> "$tmp"
     mv "$tmp" "$env_file"
   else
     mkdir -p "$(dirname "$env_file")"
     {
       echo "PORT=${port}"
-      echo "NEXT_PUBLIC_SITE_URL=http://localhost:${port}"
+      echo "NEXT_PUBLIC_SITE_URL=https://$(hostname):${port}"
     } > "$env_file"
   fi
 
