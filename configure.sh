@@ -22,6 +22,14 @@ if ! grep -qF "alias vim=" "$HOME/.bashrc"; then
   echo "Added vim=nvim alias to ~/.bashrc"
 fi
 
+# pbcopy alias (OSC 52 clipboard, works over SSH + tmux)
+if ! grep -qF "alias pbcopy=" "$HOME/.bashrc"; then
+  echo '' >> "$HOME/.bashrc"
+  echo '# pbcopy via OSC 52 (works over SSH + tmux)' >> "$HOME/.bashrc"
+  echo 'alias pbcopy='\''printf "\033]52;c;%s\a" "$(base64)"'\''' >> "$HOME/.bashrc"
+  echo "Added pbcopy alias to ~/.bashrc"
+fi
+
 # Symlink db-worktree CLI to ~/.local/bin
 mkdir -p "$HOME/.local/bin"
 ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
