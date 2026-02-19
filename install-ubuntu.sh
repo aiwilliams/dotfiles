@@ -10,6 +10,14 @@ echo "Running Ubuntu setup..."
 sudo apt-get update -y
 sudo apt-get install -y tmux keychain build-essential python3 curl ca-certificates fzf shellcheck
 
+# --- Locale ---
+
+if ! locale -a 2>/dev/null | grep -qi 'en_US\.utf'; then
+  echo "Generating en_US.UTF-8 locale..."
+  sudo locale-gen en_US.UTF-8
+fi
+sudo update-locale LANG=en_US.UTF-8
+
 # --- Kernel tuning ---
 
 SYSCTL_INOTIFY="/etc/sysctl.d/60-inotify.conf"
