@@ -210,6 +210,115 @@ pg_status_worktree_dbs() {
   done
 }
 
+# --------------------------------------------------------------------------
+# Backup / Restore
+# --------------------------------------------------------------------------
+
+PG_BACKUP_DIR="${HOME}/.local/share/wt-backups"
+
+pg_backup_worktree_dbs() {
+  local branch="$1"
+  local backup_label="${2:-}"
+  local sanitized
+  sanitized=$(pg_sanitize_branch_name "$branch")
+  local timestamp
+  timestamp=$(date +%Y%m%d-%H%M%S)
+  local backup_subdir="${PG_BACKUP_DIR}/${sanitized}/${timestamp}"
+
+  mkdir -p "$backup_subdir"
+
+  echo "==> Backing up databases for '$branch' (sanitized: '$sanitized')"
+
+  for prefix in "${DB_PREFIXES[@]}"; do
+    local dbname="${prefix}_${sanitized}"
+    if ! pg_db_exists "$dbname"; then
+      echo "Database '$dbname' does not exist, skipping."
+      continue
+    fi
+    local dump_file="${backup_subdir}/${dbname}.dump"
+    echo "Dumping '$dbname' -> $dump_file"
+    PGPASSWORD="$PG_SUPERUSER" pg_dump \
+      -U "$PG_SUPERUSER" -h localhost -p "$PG_PORT" \
+      --format=custom --no-owner --no-acl \
+      "$dbname" > "$dump_file"
+  done
+
+  if [[ -n "$backup_label" ]]; then
+    echo "$backup_label" > "${backup_subdir}/label"
+  fi
+
+  echo "==> Backup saved to $backup_subdir"
+}
+
+pg_restore_worktree_dbs() {
+  local branch="$1"
+  local backup_subdir="$2"
+  local sanitized
+  sanitized=$(pg_sanitize_branch_name "$branch")
+
+  echo "==> Restoring databases for '$branch' from $backup_subdir"
+
+  pg_create_user "$sanitized"
+
+  for prefix in "${DB_PREFIXES[@]}"; do
+    local dbname="${prefix}_${sanitized}"
+    local dump_file="${backup_subdir}/${dbname}.dump"
+    if [[ ! -f "$dump_file" ]]; then
+      echo "No dump file for '$dbname', skipping."
+      continue
+    fi
+
+    # Drop and recreate the database
+    if pg_db_exists "$dbname"; then
+      echo "Terminating connections to '$dbname'..."
+      pg_exec "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$dbname' AND pid <> pg_backend_pid();" > /dev/null 2>&1 || true
+      echo "Dropping '$dbname'..."
+      pg_exec "DROP DATABASE \"$dbname\";"
+    fi
+
+    echo "Creating '$dbname'..."
+    pg_exec "CREATE DATABASE \"$dbname\" OWNER \"$sanitized\";"
+
+    echo "Restoring '$dbname' from $dump_file"
+    PGPASSWORD="$PG_SUPERUSER" pg_restore \
+      -U "$PG_SUPERUSER" -h localhost -p "$PG_PORT" \
+      --no-owner --no-acl \
+      -d "$dbname" "$dump_file"
+  done
+
+  echo "==> Done."
+}
+
+pg_list_backups() {
+  local branch="$1"
+  local sanitized
+  sanitized=$(pg_sanitize_branch_name "$branch")
+  local backup_dir="${PG_BACKUP_DIR}/${sanitized}"
+
+  if [[ ! -d "$backup_dir" ]]; then
+    return 1
+  fi
+
+  for d in "$backup_dir"/*/; do
+    [[ -d "$d" ]] || continue
+    local ts
+    ts=$(basename "$d")
+    local label=""
+    if [[ -f "$d/label" ]]; then
+      label=" ($(cat "$d/label"))"
+    fi
+    local sizes=""
+    for f in "$d"/*.dump; do
+      [[ -f "$f" ]] || continue
+      local name size
+      name=$(basename "$f" .dump)
+      size=$(du -h "$f" | cut -f1)
+      sizes="${sizes} ${name}=${size}"
+    done
+    echo "${ts}${label} —${sizes}"
+  done
+}
+
 # Update POSTGRES_* vars in a .env file.
 # Preserves all other lines. If no .env exists, creates one from the env vars alone.
 pg_apply_env() {

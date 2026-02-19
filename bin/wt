@@ -11,6 +11,8 @@
 #   wt remove [N|wtN]             Remove worktree + drop DBs (fzf picker if no arg)
 #   wt list                       List all worktrees with status
 #   wt switch                     Interactive worktree switcher (requires fzf)
+#   wt db-backup [label]          Backup current worktree's databases
+#   wt db-restore [timestamp]     Restore databases from a backup
 
 set -euo pipefail
 
@@ -87,6 +89,30 @@ worktree_dir_for_number() {
   echo "$(dirname "$main_dir")/$(repo_name)-wt${n}"
 }
 
+# Determine the worktree identifier (e.g. "wt1" or "main") for the current directory.
+current_worktree_id() {
+  local toplevel
+  toplevel=$(git rev-parse --show-toplevel)
+  local main_dir
+  main_dir=$(main_worktree_dir)
+
+  if [[ "$toplevel" == "$main_dir" ]]; then
+    echo "main"
+    return
+  fi
+
+  local repo dir_name
+  repo=$(repo_name)
+  dir_name=$(basename "$toplevel")
+  if [[ "$dir_name" =~ ^${repo}-wt([0-9]+)$ ]]; then
+    echo "wt${BASH_REMATCH[1]}"
+    return
+  fi
+
+  echo -e "${RED}Cannot determine worktree ID for $toplevel${NC}" >&2
+  return 1
+}
+
 # Compute port from worktree number: 3000 + N
 compute_port() {
   local n="$1"
@@ -154,6 +180,8 @@ Commands:
   remove [N|wtN]             Remove worktree and drop DBs (interactive picker if no arg)
   list                       List all worktrees with ID, branch, port, and status
   switch                     Interactive worktree switcher (requires fzf)
+  db-backup [label]          Backup current worktree's databases (optional label)
+  db-restore [timestamp]     Restore databases from a backup (fzf picker if no arg)
   help                       Show detailed documentation
 EOF
   exit 1
@@ -240,6 +268,30 @@ COMPANION TOOL: db-worktree
     init-main             Create main branch DBs (first-time setup)
 
   wt create calls db-worktree clone; wt remove calls db-worktree drop.
+
+DATABASE BACKUP & RESTORE
+
+  wt db-backup [label]
+
+    Dump all databases for the current worktree using pg_dump (custom format).
+    Backups are timestamped and stored under ~/.local/share/wt-backups/<id>/.
+    An optional label (e.g. "before-migration") is saved alongside the backup
+    for easy identification.
+
+    Examples:
+      wt db-backup                    # backup with timestamp only
+      wt db-backup before-migration   # backup with a label
+
+  wt db-restore [timestamp]
+
+    Restore all databases for the current worktree from a previous backup.
+    With no argument, opens an fzf picker to choose a backup. Accepts a
+    timestamp directly to skip the picker. The target databases are dropped
+    and recreated before restoring.
+
+    Examples:
+      wt db-restore                         # interactive picker
+      wt db-restore 20260219-143000         # restore a specific backup
 EOF
 }
 
@@ -575,6 +627,62 @@ cmd_switch() {
   fi
 }
 
+cmd_db_backup() {
+  local label="${1:-}"
+  local wt_id
+  wt_id=$(current_worktree_id)
+
+  echo -e "${BOLD}Backing up databases for ${wt_id}${NC}"
+  echo ""
+  pg_backup_worktree_dbs "$wt_id" "$label"
+}
+
+cmd_db_restore() {
+  local timestamp="${1:-}"
+  local wt_id
+  wt_id=$(current_worktree_id)
+  local sanitized
+  sanitized=$(pg_sanitize_branch_name "$wt_id")
+  local backup_dir="${PG_BACKUP_DIR}/${sanitized}"
+
+  if [[ ! -d "$backup_dir" ]]; then
+    echo -e "${RED}No backups found for ${wt_id}${NC}"
+    exit 1
+  fi
+
+  if [[ -z "$timestamp" ]]; then
+    # Interactive picker
+    if ! command -v fzf &>/dev/null; then
+      echo -e "${RED}fzf is required for interactive selection, or pass a timestamp.${NC}"
+      echo ""
+      echo "Available backups:"
+      pg_list_backups "$wt_id"
+      exit 1
+    fi
+
+    local listing
+    listing=$(pg_list_backups "$wt_id")
+    if [[ -z "$listing" ]]; then
+      echo -e "${RED}No backups found for ${wt_id}${NC}"
+      exit 1
+    fi
+
+    local selection
+    selection=$(echo "$listing" | fzf --prompt="Restore backup: " --tac) || exit 0
+    timestamp=$(echo "$selection" | awk '{print $1}')
+  fi
+
+  local backup_subdir="${backup_dir}/${timestamp}"
+  if [[ ! -d "$backup_subdir" ]]; then
+    echo -e "${RED}Backup not found: ${backup_subdir}${NC}"
+    exit 1
+  fi
+
+  echo -e "${BOLD}Restoring databases for ${wt_id} from ${timestamp}${NC}"
+  echo ""
+  pg_restore_worktree_dbs "$wt_id" "$backup_subdir"
+}
+
 # --- Main dispatch ---
 
 # Ensure we're in a git repo
@@ -589,11 +697,13 @@ command="$1"
 shift
 
 case "$command" in
-  create)   cmd_create "$@" ;;
-  checkout) cmd_checkout ;;
-  remove)   cmd_remove "$@" ;;
-  list)     cmd_list ;;
-  switch)   cmd_switch ;;
-  help)     cmd_help ;;
-  *)        echo "Unknown command: $command"; usage ;;
+  create)     cmd_create "$@" ;;
+  checkout)   cmd_checkout ;;
+  remove)     cmd_remove "$@" ;;
+  list)       cmd_list ;;
+  switch)     cmd_switch ;;
+  db-backup)  cmd_db_backup "$@" ;;
+  db-restore) cmd_db_restore "$@" ;;
+  help)       cmd_help ;;
+  *)          echo "Unknown command: $command"; usage ;;
 esac
