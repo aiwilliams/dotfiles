@@ -59,6 +59,11 @@ fi
 ln -sf "$SCRIPT_DIR/hooks/pre-commit" "$SCRIPT_DIR/.git/hooks/pre-commit"
 echo "Installed pre-commit hook"
 
+# Claude Code statusline
+mkdir -p "$HOME/.claude"
+ln -sf "$SCRIPT_DIR/config/claude/statusline-command.sh" "$HOME/.claude/statusline-command.sh"
+echo "Symlinked statusline-command.sh to ~/.claude/"
+
 # Claude Code MCP servers
 source "$SCRIPT_DIR/lib/claude-mcp.sh"
 
