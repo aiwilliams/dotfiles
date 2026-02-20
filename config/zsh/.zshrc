@@ -25,7 +25,7 @@ case "$(uname -s)" in
     # pbcopy via OSC 52 (works over SSH + tmux)
     alias pbcopy='printf "\033]52;c;%s\a" "$(base64)"'
     # SSH key via keychain
-    eval "$(keychain --eval --agents ssh id_ed25519_$(hostname))"
+    eval "$(keychain --eval --quiet --agents ssh id_ed25519_$(hostname))"
     ;;
 esac
 
