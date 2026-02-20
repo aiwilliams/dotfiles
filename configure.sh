@@ -41,6 +41,20 @@ mkdir -p "$HOME/.config/tmux"
 ln -sf "$SCRIPT_DIR/config/tmux/tmux.conf" "$HOME/.config/tmux/tmux.conf"
 echo "Symlinked tmux.conf to ~/.config/tmux/"
 
+# Zsh config
+ln -sf "$SCRIPT_DIR/config/zsh/.zshrc" "$HOME/.zshrc"
+ln -sf "$SCRIPT_DIR/config/zsh/.p10k.zsh" "$HOME/.p10k.zsh"
+echo "Symlinked .zshrc and .p10k.zsh to ~/"
+
+# Set zsh as default shell (macOS already uses zsh)
+if [ "$(uname -s)" = "Linux" ]; then
+  ZSH_PATH="$(which zsh)"
+  if [ "$(getent passwd "$USER" | cut -d: -f7)" != "$ZSH_PATH" ]; then
+    echo "Changing default shell to zsh..."
+    sudo chsh -s "$ZSH_PATH" "$USER"
+  fi
+fi
+
 # Pre-commit hook
 ln -sf "$SCRIPT_DIR/hooks/pre-commit" "$SCRIPT_DIR/.git/hooks/pre-commit"
 echo "Installed pre-commit hook"

@@ -17,7 +17,17 @@ secret_patterns=(
   '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 )
 
+skip_secrets=(
+  config/zsh/.p10k.zsh  # Generated config with example comments that trigger false positives
+)
+
 while IFS= read -r file; do
+  skip=0
+  for s in "${skip_secrets[@]}"; do
+    [[ "$file" == "$s" ]] && skip=1 && break
+  done
+  [ "$skip" -eq 1 ] && continue
+
   content="$(git show ":$file" 2>/dev/null)" || continue
   for pattern in "${secret_patterns[@]}"; do
     if echo "$content" | grep -qEi "$pattern"; then

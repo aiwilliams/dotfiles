@@ -37,5 +37,8 @@ source "$SCRIPT_DIR/lib/dev-tools.sh"
 # Neovim (LazyVim)
 source "$SCRIPT_DIR/lib/neovim.sh"
 
+# Zsh (Oh My Zsh, plugins, Powerlevel10k)
+source "$SCRIPT_DIR/lib/zsh.sh"
+
 # Shell config, symlinks, hooks
 source "$SCRIPT_DIR/configure.sh"
