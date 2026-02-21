@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# pg — Execute PostgreSQL queries using connection info from .env files.
+#
+# Usage:
+#   pg [options] [sql]
+#
+# Options:
+#   -d <name>    Database: platform (default) or vector
+#   -e <path>    Path to .env file
+#   -f <file>    Execute SQL from file
+#
+# .env discovery (in order):
+#   1. Path given via -e
+#   2. .env in current directory
+#   3. apps/platform/.env from git root
+#
+# Examples:
+#   pg "SELECT * FROM users LIMIT 5"
+#   pg -d vector "SELECT 1"
+#   pg                              Open interactive psql session
+#   pg -f schema.sql                Execute SQL from file
+#   echo "SELECT 1" | pg            Pipe SQL via stdin
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: pg [options] [sql]
+
+Execute PostgreSQL queries using connection info from .env files.
+
+Options:
+  -d <name>    Database: platform (default) or vector
+  -e <path>    Path to .env file
+  -f <file>    Execute SQL from file
+  -h           Show this help
+
+.env discovery (in order):
+  1. Path given via -e
+  2. .env in current directory
+  3. apps/platform/.env from git root
+
+Examples:
+  pg "SELECT * FROM users LIMIT 5"
+  pg -d vector "SELECT 1"
+  pg                              Open interactive psql session
+  pg -f schema.sql                Execute SQL from file
+  echo "SELECT 1" | pg            Pipe SQL via stdin
+EOF
+  exit 0
+}
+
+db_prefix="platform"
+env_file=""
+sql_file=""
+
+while getopts "d:e:f:h" opt; do
+  case "$opt" in
+    d) db_prefix="$OPTARG" ;;
+    e) env_file="$OPTARG" ;;
+    f) sql_file="$OPTARG" ;;
+    h) usage ;;
+    *) usage ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+# --- Discover .env file ---
+
+find_env_file() {
+  if [[ -n "$env_file" ]]; then
+    if [[ ! -f "$env_file" ]]; then
+      echo "Error: .env file not found: $env_file" >&2
+      exit 1
+    fi
+    return
+  fi
+
+  if [[ -f ".env" ]]; then
+    env_file=".env"
+    return
+  fi
+
+  local git_root
+  git_root=$(git rev-parse --show-toplevel 2>/dev/null) || true
+  if [[ -n "$git_root" && -f "$git_root/apps/platform/.env" ]]; then
+    env_file="$git_root/apps/platform/.env"
+    return
+  fi
+
+  echo "Error: No .env file found. Searched:" >&2
+  echo "  .env (current directory)" >&2
+  if [[ -n "${git_root:-}" ]]; then
+    echo "  $git_root/apps/platform/.env" >&2
+  fi
+  echo "" >&2
+  echo "Use -e <path> to specify a .env file." >&2
+  exit 1
+}
+
+find_env_file
+
+# --- Extract connection URL ---
+
+if [[ "$db_prefix" == "vector" ]]; then
+  url_var="POSTGRES_VECTOR_URL"
+else
+  url_var="POSTGRES_URL"
+fi
+
+url=$(grep "^${url_var}=" "$env_file" | head -1 | sed "s/^${url_var}=//" | tr -d '"' | tr -d "'")
+
+if [[ -z "$url" ]]; then
+  echo "Error: $url_var not found in $env_file" >&2
+  exit 1
+fi
+
+# --- Execute ---
+
+if [[ -n "$sql_file" ]]; then
+  exec psql "$url" -f "$sql_file"
+elif [[ $# -gt 0 ]]; then
+  exec psql "$url" -c "$*"
+else
+  exec psql "$url"
+fi
