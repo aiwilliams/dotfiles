@@ -563,58 +563,84 @@ cmd_list() {
   main_dir=$(main_worktree_dir)
   local repo
   repo=$(repo_name)
+  local home_dir="$HOME"
 
-  printf "${BOLD}%-6s %-40s %-25s %-8s %-10s %s${NC}\n" "ID" "DIRECTORY" "BRANCH" "PORT" "STATUS" "COMMIT"
+  {
+    printf "ID\tDIRECTORY\tBRANCH\tPORT\tSTATUS\tCOMMIT\n"
 
-  git worktree list --porcelain | awk -v main_dir="$main_dir" -v repo="$repo" '
-    /^worktree / { wt = $2 }
-    /^HEAD /     { commit = substr($2, 1, 7) }
-    /^branch /   { branch = $2; sub(/^refs\/heads\//, "", branch) }
-    /^detached/  { branch = "(detached)" }
-    /^$/ {
-      if (wt != "") {
-        # Check for dirty state
-        cmd = "git -C " wt " status --porcelain 2>/dev/null | head -1"
-        cmd | getline dirty
-        close(cmd)
-        status = (dirty != "") ? "*" : ""
+    git worktree list --porcelain | awk -v main_dir="$main_dir" -v repo="$repo" -v home="$home_dir" '
+      /^worktree / { wt = $2 }
+      /^HEAD /     { commit = substr($2, 1, 7) }
+      /^branch /   { branch = $2; sub(/^refs\/heads\//, "", branch) }
+      /^detached/  { branch = "(detached)" }
+      /^$/ {
+        if (wt != "") {
+          # Check for dirty state
+          cmd = "git -C " wt " status --porcelain 2>/dev/null | head -1"
+          cmd | getline dirty
+          close(cmd)
+          status = (dirty != "") ? "*" : ""
 
-        dir_name = wt
-        sub(/.*\//, "", dir_name)
+          dir_name = wt
+          sub(/.*\//, "", dir_name)
 
-        if (wt == main_dir) {
-          id = "main"
-          port = "3000"
-        } else {
-          # Check if this is a wtN-style worktree
-          pattern = repo "-wt"
-          if (index(dir_name, pattern) == 1) {
-            num = substr(dir_name, length(pattern) + 1)
-            if (num ~ /^[0-9]+$/) {
-              id = "wt" num
-              port = 3000 + num
+          if (wt == main_dir) {
+            id = "main"
+            port = "3000"
+          } else {
+            # Check if this is a wtN-style worktree
+            pattern = repo "-wt"
+            if (index(dir_name, pattern) == 1) {
+              num = substr(dir_name, length(pattern) + 1)
+              if (num ~ /^[0-9]+$/) {
+                id = "wt" num
+                port = 3000 + num
+              } else {
+                id = "?"
+                port = "?"
+              }
             } else {
-              id = "?"
+              id = "old"
               port = "?"
             }
-          } else {
-            id = "old"
-            port = "?"
           }
-        }
 
-        printf "%-6s %-40s %-25s %-8s %-10s %s\n", id, wt, branch, port, status, commit
+          # Abbreviate directory: replace $HOME with ~, shorten intermediate segments
+          display_dir = wt
+          if (index(display_dir, home) == 1) {
+            display_dir = "~" substr(display_dir, length(home) + 1)
+          }
+          n = split(display_dir, parts, "/")
+          result = parts[1]
+          for (i = 2; i < n; i++) {
+            result = result "/" substr(parts[i], 1, 1)
+          }
+          if (n > 1) result = result "/" parts[n]
+          display_dir = result
+
+          # Truncate long branch names
+          max_branch = 30
+          if (length(branch) > max_branch) {
+            branch = substr(branch, 1, max_branch - 1) "…"
+          }
+
+          printf "%s\t%s\t%s\t%s\t%s\t%s\n", id, display_dir, branch, port, status, commit
+        }
+        wt = ""; commit = ""; branch = ""; dirty = ""
       }
-      wt = ""; commit = ""; branch = ""; dirty = ""
-    }
-  '
+    '
+  } | column -t -s $'\t' | {
+    IFS= read -r header
+    echo -e "${BOLD}${header}${NC}"
+    cat
+  }
 }
 
 cmd_switch() {
   if ! command -v fzf &>/dev/null; then
-    echo "fzf is required for interactive switching. Install it or use 'cd' directly."
-    echo ""
-    cmd_list
+    echo "fzf is required for interactive switching. Install it or use 'cd' directly." >&2
+    echo "" >&2
+    cmd_list >&2
     exit 1
   fi
 
@@ -623,7 +649,6 @@ cmd_switch() {
 
   if [[ -n "$selection" ]]; then
     echo "$selection"
-    cd "$selection" || exit 1
   fi
 }
 

@@ -14,9 +14,20 @@ source "$ZSH/oh-my-zsh.sh"
 
 export NX_TUI=false
 
-# --- Aliases ---
+# --- Aliases & Functions ---
 
 alias vim=nvim
+
+# Wrap wt so that `wt switch` can cd in the current shell
+wt() {
+  if [[ "${1:-}" == "switch" ]]; then
+    local dir
+    dir=$(command wt switch) || return
+    [[ -n "$dir" ]] && cd "$dir"
+  else
+    command wt "$@"
+  fi
+}
 
 # --- Platform-specific ---
 
