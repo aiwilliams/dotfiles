@@ -357,12 +357,12 @@ POSTGRES_HOST="postgresql://${user}:${user}@localhost:${PG_PORT}"
 POSTGRES_PASSWORD="${user}"
 POSTGRES_DATABASE="platform_${sanitized}"
 
-POSTGRES_VECTOR_URL=postgresql://${user}:${user}@localhost:${PG_PORT}/vector_${sanitized}
-POSTGRES_VECTOR_PRISMA_URL=postgresql://${user}:${user}@localhost:${PG_PORT}/vector_${sanitized}?pgbouncer=true&connect_timeout=15&pool_timeout=30&connection_limit=100
-POSTGRES_VECTOR_URL_NON_POOLING=postgresql://${user}:${user}@localhost:${PG_PORT}/vector_${sanitized}
-POSTGRES_VECTOR_USER=${user}
-POSTGRES_VECTOR_HOST=postgresql://${user}:${user}@localhost:${PG_PORT}
-POSTGRES_VECTOR_PASSWORD=${user}
-POSTGRES_VECTOR_DATABASE=vector_${sanitized}
+POSTGRES_VECTOR_URL="postgresql://${user}:${user}@localhost:${PG_PORT}/vector_${sanitized}"
+POSTGRES_VECTOR_PRISMA_URL="postgresql://${user}:${user}@localhost:${PG_PORT}/vector_${sanitized}?pgbouncer=true&connect_timeout=15&pool_timeout=30&connection_limit=100"
+POSTGRES_VECTOR_URL_NON_POOLING="postgresql://${user}:${user}@localhost:${PG_PORT}/vector_${sanitized}"
+POSTGRES_VECTOR_USER="${user}"
+POSTGRES_VECTOR_HOST="postgresql://${user}:${user}@localhost:${PG_PORT}"
+POSTGRES_VECTOR_PASSWORD="${user}"
+POSTGRES_VECTOR_DATABASE="vector_${sanitized}"
 EOF
 }
