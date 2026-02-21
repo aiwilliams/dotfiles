@@ -17,9 +17,6 @@ OS_FG=255     # os_icon foreground
 DIR_FG=31     # directory foreground
 DIR_ANCHOR=39 # directory anchor (last component) foreground
 VCS_CLEAN=76  # git clean
-VCS_MOD=178   # git modified
-VCS_UNTRACKED=39  # git untracked
-VCS_CONFLICT=196  # git conflicted
 META=244      # grey meta text
 
 # Powerline glyphs
@@ -44,14 +41,17 @@ else
   anchor="$dir"
 fi
 
-# --- Git segment ---
+# --- Git segment (lock-free: reads HEAD directly from filesystem) ---
 git_info=""
-if git -C "$cwd" rev-parse --git-dir &>/dev/null; then
-  branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
-  if [[ -z "$branch" ]]; then
-    # Detached HEAD - show short commit
-    branch=$(git -C "$cwd" rev-parse --short HEAD 2>/dev/null)
-    branch="@${branch}"
+git_dir=$(git -C "$cwd" rev-parse --git-dir 2>/dev/null)
+if [[ -n "$git_dir" ]]; then
+  # Read branch from HEAD file directly — no index lock needed
+  head_content=$(cat "$git_dir/HEAD" 2>/dev/null)
+  if [[ "$head_content" == ref:* ]]; then
+    branch="${head_content#ref: refs/heads/}"
+  else
+    # Detached HEAD
+    branch="@${head_content:0:7}"
   fi
 
   # Truncate long branch names (first 12...last 12)
@@ -59,46 +59,7 @@ if git -C "$cwd" rev-parse --git-dir &>/dev/null; then
     branch="${branch:0:12}…${branch: -12}"
   fi
 
-  # Get status counts
-  staged=0 unstaged=0 untracked=0 conflicted=0
-  while IFS= read -r line; do
-    x="${line:0:1}" y="${line:1:1}"
-    case "$x$y" in
-      "##"|"!!") ;;
-      *U*|AA|DD) ((conflicted++)) ;;
-      *)
-        [[ "$x" != " " && "$x" != "?" ]] && ((staged++))
-        [[ "$y" != " " && "$y" != "?" ]] && ((unstaged++))
-        [[ "$x" == "?" ]] && ((untracked++))
-        ;;
-    esac
-  done < <(git -C "$cwd" status --porcelain=v1 2>/dev/null)
-
-  # Ahead/behind
-  ahead=0 behind=0
-  read -r ahead behind < <(git -C "$cwd" rev-list --left-right --count "HEAD...@{upstream}" 2>/dev/null || echo "0 0")
-
-  # Choose color based on state
-  if (( conflicted > 0 )); then
-    vcs_fg=$VCS_CONFLICT
-  elif (( staged > 0 || unstaged > 0 )); then
-    vcs_fg=$VCS_MOD
-  else
-    vcs_fg=$VCS_CLEAN
-  fi
-
-  # Build git string
-  git_info="$(fg $vcs_fg)${BRANCH} ${branch}"
-
-  # Behind/ahead
-  (( behind > 0 )) && git_info+=" $(fg $VCS_CLEAN)⇣${behind}"
-  (( ahead > 0 )) && git_info+=" $(fg $VCS_CLEAN)⇡${ahead}"
-
-  # Staged/unstaged/untracked/conflicted
-  (( conflicted > 0 )) && git_info+=" $(fg $VCS_CONFLICT)~${conflicted}"
-  (( staged > 0 )) && git_info+=" $(fg $VCS_MOD)+${staged}"
-  (( unstaged > 0 )) && git_info+=" $(fg $VCS_MOD)!${unstaged}"
-  (( untracked > 0 )) && git_info+=" $(fg $VCS_UNTRACKED)?${untracked}"
+  git_info="$(fg $VCS_CLEAN)${BRANCH} ${branch}"
 fi
 
 # --- Render segments ---
