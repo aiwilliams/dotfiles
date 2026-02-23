@@ -72,6 +72,18 @@ sudo systemctl reload postgresql
 source "$SCRIPT_DIR/lib/postgres.sh"
 pg_create_worktree_dbs "main"
 
+# --- zmx ---
+
+if ! command -v zmx &>/dev/null; then
+  echo "Installing zmx..."
+  ZMX_VERSION="0.4.1"
+  ZMX_ARCH="$(uname -m)"
+  curl -fLo /tmp/zmx.tar.gz "https://zmx.sh/a/zmx-${ZMX_VERSION}-linux-${ZMX_ARCH}.tar.gz"
+  tar -xzf /tmp/zmx.tar.gz -C /tmp
+  sudo install -m 755 /tmp/zmx /usr/local/bin/zmx
+  rm -f /tmp/zmx /tmp/zmx.tar.gz
+fi
+
 # --- Shell config ---
 
 KEYCHAIN_LINE='eval "$(keychain --eval --agents ssh id_ed25519_$(hostname))"'
