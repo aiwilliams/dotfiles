@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # p10k-style statusline for Claude Code
-# Mirrors ~/.p10k.zsh: os_icon | dir | vcs segments with powerline separators
+# Mirrors ~/.p10k.zsh: os_icon | dir | vcs | zmx segments with powerline separators
 
 input=$(cat)
 cwd=$(echo "$input" | jq -r '.cwd')
@@ -39,6 +39,12 @@ if [[ "$dir" == */* ]]; then
 else
   parent=""
   anchor="$dir"
+fi
+
+# --- ZMX session segment (reads $ZMX_SESSION from inherited environment) ---
+zmx_info=""
+if [[ -n "$ZMX_SESSION" ]]; then
+  zmx_info="[${ZMX_SESSION}]"
 fi
 
 # --- Git segment (lock-free: reads HEAD directly from filesystem) ---
@@ -84,6 +90,11 @@ fi
 # Git segment (if available)
 if [[ -n "$git_info" ]]; then
   output+=" $(fg $META)${SUBSEP} ${git_info}"
+fi
+
+# ZMX session segment (if inside a zmx session)
+if [[ -n "$zmx_info" ]]; then
+  output+=" $(fg $META)${SUBSEP} $(reset)$(fg $META)${zmx_info}"
 fi
 
 # End cap
