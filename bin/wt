@@ -11,6 +11,7 @@
 #   wt remove [N|wtN]             Remove worktree + drop DBs (fzf picker if no arg)
 #   wt list                       List all worktrees with status
 #   wt switch                     Interactive worktree switcher (requires fzf)
+#   wt env-sync                   Copy main .env to all worktrees
 #   wt db-backup [label]          Backup current worktree's databases
 #   wt db-restore [timestamp]     Restore databases from a backup
 
@@ -180,6 +181,7 @@ Commands:
   remove [N|wtN]             Remove worktree and drop DBs (interactive picker if no arg)
   list                       List all worktrees with ID, branch, port, and status
   switch                     Interactive worktree switcher (requires fzf)
+  env-sync                   Copy main .env to all worktrees, preserving wt-specific vars
   db-backup [label]          Backup current worktree's databases (optional label)
   db-restore [timestamp]     Restore databases from a backup (fzf picker if no arg)
   help                       Show detailed documentation
@@ -247,6 +249,13 @@ COMMANDS
 
     Interactive fzf picker to select a worktree and print its path. Useful
     with cd: cd $(wt switch)
+
+  wt env-sync
+
+    Copy the main worktree's apps/platform/.env to every wtN worktree, then
+    re-apply each worktree's specific vars (POSTGRES_*, PORT, NEXT_PUBLIC_HOST,
+    NEXT_PUBLIC_SITE_URL). Run this after editing the primary .env to propagate
+    changes to all worktrees.
 
   wt help
 
@@ -662,6 +671,50 @@ cmd_db_backup() {
   pg_backup_worktree_dbs "$wt_id" "$label"
 }
 
+cmd_env_sync() {
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  local main_env
+  main_env=$(env_file_for "$main_dir")
+  local repo
+  repo=$(repo_name)
+  local parent_dir
+  parent_dir=$(dirname "$main_dir")
+
+  if [[ ! -f "$main_env" ]]; then
+    echo -e "${RED}Main .env not found: ${main_env}${NC}"
+    exit 1
+  fi
+
+  local count=0
+
+  for dir in "$parent_dir/${repo}"-wt[0-9]*; do
+    [[ -d "$dir" ]] || continue
+    local name
+    name=$(basename "$dir")
+    local num="${name#"${repo}-wt"}"
+    if [[ "$num" =~ ^[0-9]+$ ]]; then
+      local wt_id="wt${num}"
+      local wt_env
+      wt_env=$(env_file_for "$dir")
+      local port
+      port=$(compute_port "$num")
+
+      cp "$main_env" "$wt_env"
+      write_env_vars "$wt_env" "$wt_id" "$port"
+      echo -e "${GREEN}${wt_id}${NC} → $wt_env"
+      ((++count))
+    fi
+  done
+
+  if [[ "$count" -eq 0 ]]; then
+    echo -e "${YELLOW}No worktrees found to sync.${NC}"
+  else
+    echo ""
+    echo -e "${BOLD}Synced .env to ${count} worktree(s) from main.${NC}"
+  fi
+}
+
 cmd_db_restore() {
   local timestamp="${1:-}"
   local wt_id
@@ -727,6 +780,7 @@ case "$command" in
   remove)     cmd_remove "$@" ;;
   list)       cmd_list ;;
   switch)     cmd_switch ;;
+  env-sync)   cmd_env_sync ;;
   db-backup)  cmd_db_backup "$@" ;;
   db-restore) cmd_db_restore "$@" ;;
   help)       cmd_help ;;
