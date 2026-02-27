@@ -8,7 +8,17 @@ echo "Running Ubuntu setup..."
 # --- System packages ---
 
 sudo apt-get update -y
-sudo apt-get install -y zsh tmux keychain build-essential python3 curl ca-certificates fzf shellcheck
+sudo apt-get install -y zsh tmux keychain build-essential python3 curl ca-certificates fzf shellcheck docker.io
+
+# --- Docker ---
+
+sudo systemctl enable docker
+sudo systemctl start docker
+if ! groups "$USER" | grep -q '\bdocker\b'; then
+  echo "Adding $USER to docker group..."
+  sudo usermod -aG docker "$USER"
+  echo "NOTE: Log out and back in (or run 'newgrp docker') for group change to take effect."
+fi
 
 # --- Locale ---
 
