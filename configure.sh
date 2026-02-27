@@ -35,7 +35,8 @@ mkdir -p "$HOME/.local/bin"
 ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
 ln -sf "$SCRIPT_DIR/bin/wt" "$HOME/.local/bin/wt"
 ln -sf "$SCRIPT_DIR/bin/pg" "$HOME/.local/bin/pg"
-echo "Symlinked db-worktree, wt, and pg to ~/.local/bin/"
+ln -sf "$SCRIPT_DIR/bin/cmux-ws" "$HOME/.local/bin/cmux-ws"
+echo "Symlinked db-worktree, wt, pg, and cmux-ws to ~/.local/bin/"
 
 # tmux config
 mkdir -p "$HOME/.config/tmux"

@@ -1,0 +1,651 @@
+#!/usr/bin/env bash
+# cmux-ws — Cmux workspace manager.
+#
+# Declare workspace layouts + commands in YAML configs, then restore or
+# reattach them in cmux.
+#
+# Usage:
+#   cmux-ws init                Initialize ~/.cmux-workspaces/ git repo
+#   cmux-ws scaffold [name]     Generate YAML template from current cmux state
+#   cmux-ws restore <name>      Create workspace + panes + run commands
+#   cmux-ws reattach <name>     Re-run commands in existing panes
+#   cmux-ws list                List saved workspace configs
+#   cmux-ws edit <name>         Open config in $EDITOR
+#   cmux-ws sync                Git add + commit + push configs
+#   cmux-ws pull                Git pull --rebase configs
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
+
+# Parse global flags before sourcing library
+DRY_RUN=false
+VERBOSE=false
+ARGS=()
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    --verbose) VERBOSE=true ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+
+export DRY_RUN VERBOSE
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+# shellcheck source=../lib/cmux-ws.sh
+source "$LIB_DIR/cmux-ws.sh"
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+usage() {
+  cat <<EOF
+Usage: cmux-ws <command> [args] [--dry-run] [--verbose]
+
+Commands:
+  init                Initialize ~/.cmux-workspaces/ git repo
+  scaffold [name]     Generate YAML template from current cmux state
+  restore <name>      Create workspace + panes + run commands from config
+  reattach <name>     Re-run commands in existing panes (after app restart)
+  list                List saved workspace configs
+  edit <name>         Open config in \$EDITOR
+  sync                Git add + commit + push workspace configs
+  pull                Git pull --rebase configs
+
+Global flags:
+  --dry-run           Show what would be done without executing
+  --verbose           Show cmux API calls
+EOF
+  exit 1
+}
+
+cmd_init() {
+  if [[ -d "$CMUX_WS_DIR/.git" ]]; then
+    echo -e "${YELLOW}Already initialized: ${CMUX_WS_DIR}${NC}"
+    return
+  fi
+
+  echo -e "${BOLD}Initializing workspace config directory...${NC}"
+  mkdir -p "$CMUX_WS_CONFIG_DIR"
+  mkdir -p "$CMUX_WS_PANE_MAPS_DIR"
+
+  (
+    cd "$CMUX_WS_DIR"
+    git init
+    cat > .gitignore <<'GITIGNORE'
+state/
+GITIGNORE
+    git add .gitignore
+    git commit -m "Initial commit"
+  )
+
+  echo ""
+  echo -e "${GREEN}Initialized ${CMUX_WS_DIR}${NC}"
+  echo ""
+  echo "Next steps:"
+  echo "  1. Create workspace configs in ${CMUX_WS_CONFIG_DIR}/"
+  echo "  2. Or run: cmux-ws scaffold <name>"
+  echo "  3. Add a remote: cd ${CMUX_WS_DIR} && git remote add origin <url>"
+}
+
+cmd_list() {
+  require_cmux_ws_dir
+
+  local configs
+  configs=$(list_configs)
+
+  if [[ -z "$configs" ]]; then
+    echo -e "${YELLOW}No workspace configs found.${NC}"
+    echo "Create one with: cmux-ws scaffold <name>"
+    return
+  fi
+
+  echo -e "${BOLD}Workspace configs:${NC}"
+  echo "$configs" | while read -r name; do
+    local config_file
+    config_file=$(config_file_for "$name")
+    local pane_count
+    pane_count=$(yq '.panes | length' "$config_file" 2>/dev/null || echo "?")
+    local ws_id
+    ws_id=$(state_get_workspace_id "$name" 2>/dev/null || true)
+    local status=""
+    if [[ -n "$ws_id" ]]; then
+      status=" (workspace: ${ws_id})"
+    fi
+    echo -e "  ${GREEN}${name}${NC}  ${pane_count} pane(s)${status}"
+  done
+}
+
+cmd_edit() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo -e "${RED}Usage: cmux-ws edit <name>${NC}"
+    exit 1
+  fi
+
+  require_cmux_ws_dir
+
+  local config_file
+  config_file=$(config_file_for "$name")
+  if [[ ! -f "$config_file" ]]; then
+    echo -e "${RED}Config not found: ${config_file}${NC}"
+    exit 1
+  fi
+
+  "${EDITOR:-vim}" "$config_file"
+}
+
+cmd_scaffold() {
+  local name="${1:-}"
+  require_cmd cmux
+  require_cmd yq "brew install yq"
+  require_cmd jq
+
+  # Get current workspace info
+  local ws_json
+  ws_json=$(cmux current-workspace --json 2>/dev/null) || {
+    echo -e "${RED}Failed to query cmux. Is cmux running?${NC}"
+    exit 1
+  }
+
+  local ws_id ws_title
+  ws_id=$(echo "$ws_json" | jq -r '.id // .uuid // empty')
+  ws_title=$(echo "$ws_json" | jq -r '.title // .name // empty')
+
+  if [[ -z "$name" ]]; then
+    if [[ -n "$ws_title" ]]; then
+      name=$(echo "$ws_title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')
+    else
+      name="workspace"
+    fi
+  fi
+
+  # Get surfaces
+  local surfaces_json
+  surfaces_json=$(cmux list-surfaces --json 2>/dev/null) || {
+    echo -e "${RED}Failed to list surfaces.${NC}"
+    exit 1
+  }
+
+  local surface_count
+  surface_count=$(echo "$surfaces_json" | jq 'length')
+
+  require_cmux_ws_dir
+
+  local config_file
+  config_file=$(config_file_for "$name")
+
+  if [[ -f "$config_file" ]]; then
+    echo -e "${YELLOW}Config already exists: ${config_file}${NC}"
+    echo -n "Overwrite? [y/N] "
+    read -r answer
+    [[ "$answer" =~ ^[Yy]$ ]] || exit 0
+  fi
+
+  # Generate YAML
+  {
+    echo "# Generated by: cmux-ws scaffold"
+    echo "# Workspace: ${ws_title:-$name} (${ws_id})"
+    echo "# Surfaces: ${surface_count}"
+    echo "# Review and adjust split directions + from references as needed."
+    echo "name: ${name}"
+    echo ""
+    echo "panes:"
+
+    local i=0
+    while [[ "$i" -lt "$surface_count" ]]; do
+      local pane_id="pane-${i}"
+      if [[ "$i" -eq 0 ]]; then
+        echo "  - id: ${pane_id}"
+        echo "    dir: "~""
+        echo "    # command: "
+      else
+        echo ""
+        echo "  - id: ${pane_id}"
+        echo "    split: right    # TODO: adjust direction"
+        echo "    dir: "~""
+        echo "    # command: "
+      fi
+      ((i++))
+    done
+
+    if [[ "$surface_count" -gt 0 ]]; then
+      echo ""
+      echo "focus: pane-0"
+    fi
+  } > "$config_file"
+
+  echo -e "${GREEN}Scaffolded: ${config_file}${NC}"
+  echo ""
+  cat "$config_file"
+}
+
+restore_dry_run() {
+  local config_json="$1" pane_count="$2" focus_pane="$3"
+
+  echo -e "${YELLOW}[dry-run] Would execute:${NC}"
+  echo "  cmux new-workspace"
+  echo "  cmux current-workspace --json"
+  echo "  cmux list-surfaces --workspace <id> --json"
+
+  local first_pane_id
+  first_pane_id=$(config_get_pane_field "$config_json" 0 "id")
+  echo ""
+  echo "  Pane ${first_pane_id} → initial surface"
+
+  local i=1
+  while [[ "$i" -lt "$pane_count" ]]; do
+    local pane_id split_dir from_pane
+    pane_id=$(config_get_pane_field "$config_json" "$i" "id")
+    split_dir=$(config_get_pane_field "$config_json" "$i" "split")
+    from_pane=$(config_get_pane_field "$config_json" "$i" "from")
+    if [[ -z "$from_pane" ]]; then
+      from_pane=$(config_get_pane_field "$config_json" $((i - 1)) "id")
+    fi
+    echo "  cmux focus-surface --surface <${from_pane}>"
+    echo "  cmux new-split ${split_dir}"
+    echo "  Pane ${pane_id} → new surface"
+    ((i++))
+  done
+
+  echo ""
+  i=0
+  while [[ "$i" -lt "$pane_count" ]]; do
+    local pane_id dir command
+    pane_id=$(config_get_pane_field "$config_json" "$i" "id")
+    dir=$(config_get_pane_field "$config_json" "$i" "dir")
+    command=$(config_get_pane_field "$config_json" "$i" "command")
+    if [[ -n "$dir" ]]; then
+      local expanded_dir="${dir/#\~/$HOME}"
+      echo "  cmux send-surface --surface <${pane_id}> \"cd ${expanded_dir}\""
+    fi
+    if [[ -n "$command" ]]; then
+      echo "  cmux send-surface --surface <${pane_id}> \"${command}\""
+    fi
+    ((i++))
+  done
+
+  if [[ -n "$focus_pane" ]]; then
+    echo ""
+    echo "  cmux focus-surface --surface <${focus_pane}>"
+  fi
+}
+
+reattach_dry_run() {
+  local config_json="$1" pane_count="$2" focus_pane="$3" workspace_id="$4"
+
+  echo -e "${YELLOW}[dry-run] Would execute:${NC}"
+  echo "  cmux list-workspaces --json  (verify ${workspace_id} exists)"
+  echo "  cmux list-surfaces --workspace ${workspace_id} --json"
+
+  echo ""
+  local i=0
+  while [[ "$i" -lt "$pane_count" ]]; do
+    local pane_id dir command
+    pane_id=$(config_get_pane_field "$config_json" "$i" "id")
+    dir=$(config_get_pane_field "$config_json" "$i" "dir")
+    command=$(config_get_pane_field "$config_json" "$i" "command")
+    if [[ -n "$dir" ]]; then
+      local expanded_dir="${dir/#\~/$HOME}"
+      echo "  cmux send-surface --surface <${pane_id}> \"cd ${expanded_dir}\""
+    fi
+    if [[ -n "$command" ]]; then
+      echo "  cmux send-surface --surface <${pane_id}> \"${command}\""
+    fi
+    ((i++))
+  done
+
+  if [[ -n "$focus_pane" ]]; then
+    echo ""
+    echo "  cmux focus-surface --surface <${focus_pane}>"
+  fi
+}
+
+cmd_restore() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo -e "${RED}Usage: cmux-ws restore <name>${NC}"
+    exit 1
+  fi
+
+  require_cmux_ws_dir
+  require_cmd cmux
+  require_cmd yq "brew install yq"
+  require_cmd jq
+
+  local config_file
+  config_file=$(config_file_for "$name")
+  local config_json
+  config_json=$(parse_workspace_config "$config_file")
+
+  local ws_name pane_count focus_pane
+  ws_name=$(config_get_name "$config_json")
+  pane_count=$(config_get_pane_count "$config_json")
+  focus_pane=$(config_get_focus "$config_json")
+
+  echo -e "${BOLD}Restoring workspace: ${ws_name} (${pane_count} panes)${NC}"
+  echo ""
+
+  # Dry-run: show planned actions and exit (can't simulate cmux IDs)
+  if [[ "$DRY_RUN" == true ]]; then
+    restore_dry_run "$config_json" "$pane_count" "$focus_pane"
+    return
+  fi
+
+  # Create workspace
+  echo -e "${GREEN}Creating workspace...${NC}"
+  cmux_new_workspace
+  sleep 0.5
+
+  # Get the new workspace ID
+  local ws_json workspace_id
+  ws_json=$(cmux_current_workspace)
+  workspace_id=$(echo "$ws_json" | jq -r '.id // .uuid // empty')
+
+  if [[ -z "$workspace_id" || "$workspace_id" == "null" ]]; then
+    echo -e "${RED}Failed to get workspace ID${NC}"
+    exit 1
+  fi
+
+  echo -e "  Workspace ID: ${workspace_id}"
+
+  # Get initial surface
+  local surfaces_json initial_surface
+  surfaces_json=$(cmux_list_surfaces "$workspace_id")
+  initial_surface=$(echo "$surfaces_json" | jq -r '.[0].id // .[0].uuid // empty')
+
+  if [[ -z "$initial_surface" || "$initial_surface" == "null" ]]; then
+    echo -e "${RED}Failed to get initial surface ID${NC}"
+    exit 1
+  fi
+
+  # Temp file for pane_id → surface_id map (bash 3 compatible)
+  local pane_map
+  pane_map=$(pane_map_create)
+  # shellcheck disable=SC2064
+  trap "rm -f '$pane_map'" EXIT
+
+  local first_pane_id
+  first_pane_id=$(config_get_pane_field "$config_json" 0 "id")
+  pane_map_set "$pane_map" "$first_pane_id" "$initial_surface"
+  state_save_pane_map "$name" "$first_pane_id" "$initial_surface"
+  echo -e "  ${first_pane_id} → ${initial_surface}"
+
+  # Create remaining panes via splits
+  local i=1
+  while [[ "$i" -lt "$pane_count" ]]; do
+    local pane_id split_dir from_pane
+    pane_id=$(config_get_pane_field "$config_json" "$i" "id")
+    split_dir=$(config_get_pane_field "$config_json" "$i" "split")
+    from_pane=$(config_get_pane_field "$config_json" "$i" "from")
+
+    # Default from to previous pane
+    if [[ -z "$from_pane" ]]; then
+      from_pane=$(config_get_pane_field "$config_json" $((i - 1)) "id")
+    fi
+
+    local from_surface
+    from_surface=$(pane_map_get "$pane_map" "$from_pane")
+    if [[ -z "$from_surface" ]]; then
+      echo -e "${RED}Cannot find surface for pane: ${from_pane}${NC}"
+      exit 1
+    fi
+
+    echo -e "  Splitting ${split_dir} from ${from_pane}..."
+    cmux_focus_surface "$from_surface"
+    sleep 0.3
+
+    # Snapshot surfaces before split
+    local before_file after_file
+    before_file=$(mktemp)
+    cmux_list_surfaces "$workspace_id" | extract_surface_ids > "$before_file"
+
+    cmux_new_split "$split_dir"
+    sleep 0.5
+
+    # Snapshot after and diff
+    after_file=$(mktemp)
+    cmux_list_surfaces "$workspace_id" | extract_surface_ids > "$after_file"
+
+    local new_surface
+    new_surface=$(find_new_surface_ids "$before_file" "$after_file" | head -1)
+    rm -f "$before_file" "$after_file"
+
+    if [[ -z "$new_surface" ]]; then
+      echo -e "${RED}Failed to detect new surface after split${NC}"
+      exit 1
+    fi
+
+    pane_map_set "$pane_map" "$pane_id" "$new_surface"
+    state_save_pane_map "$name" "$pane_id" "$new_surface"
+    echo -e "  ${pane_id} → ${new_surface}"
+
+    ((i++))
+  done
+
+  # Save workspace ID
+  state_save_workspace_id "$name" "$workspace_id"
+
+  # Send commands to each pane
+  echo ""
+  echo -e "${GREEN}Sending commands...${NC}"
+  i=0
+  while [[ "$i" -lt "$pane_count" ]]; do
+    local pane_id dir command surface_id
+    pane_id=$(config_get_pane_field "$config_json" "$i" "id")
+    dir=$(config_get_pane_field "$config_json" "$i" "dir")
+    command=$(config_get_pane_field "$config_json" "$i" "command")
+    surface_id=$(pane_map_get "$pane_map" "$pane_id")
+
+    if [[ -n "$dir" || -n "$command" ]]; then
+      echo -e "  ${pane_id}: ${command:-<shell>}"
+      cmux_send_command "$surface_id" "$dir" "$command"
+      sleep 0.3
+    fi
+
+    ((i++))
+  done
+
+  # Focus designated pane
+  if [[ -n "$focus_pane" ]]; then
+    local focus_surface
+    focus_surface=$(pane_map_get "$pane_map" "$focus_pane")
+    if [[ -n "$focus_surface" ]]; then
+      echo ""
+      echo -e "Focusing: ${focus_pane}"
+      cmux_focus_surface "$focus_surface"
+    fi
+  fi
+
+  echo ""
+  echo -e "${BOLD}Workspace restored: ${ws_name}${NC}"
+}
+
+cmd_reattach() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    echo -e "${RED}Usage: cmux-ws reattach <name>${NC}"
+    exit 1
+  fi
+
+  require_cmux_ws_dir
+  require_cmd cmux
+  require_cmd yq "brew install yq"
+  require_cmd jq
+
+  local config_file
+  config_file=$(config_file_for "$name")
+  local config_json
+  config_json=$(parse_workspace_config "$config_file")
+
+  local ws_name pane_count focus_pane
+  ws_name=$(config_get_name "$config_json")
+  pane_count=$(config_get_pane_count "$config_json")
+  focus_pane=$(config_get_focus "$config_json")
+
+  echo -e "${BOLD}Reattaching workspace: ${ws_name}${NC}"
+  echo ""
+
+  # Look up saved workspace ID
+  local workspace_id
+  workspace_id=$(state_get_workspace_id "$name" 2>/dev/null || true)
+
+  if [[ -z "$workspace_id" ]]; then
+    echo -e "${RED}No saved state for workspace '${name}'.${NC}"
+    echo "Run 'cmux-ws restore ${name}' first, or use restore for a fresh setup."
+    exit 1
+  fi
+
+  # Dry-run: show planned actions and exit
+  if [[ "$DRY_RUN" == true ]]; then
+    reattach_dry_run "$config_json" "$pane_count" "$focus_pane" "$workspace_id"
+    return
+  fi
+
+  # Verify workspace still exists
+  local ws_exists
+  ws_exists=$(cmux_list_workspaces | jq --arg id "$workspace_id" \
+    '[.[] | select(.id == $id or .uuid == $id)] | length')
+
+  if [[ "$ws_exists" -eq 0 ]]; then
+    echo -e "${YELLOW}Workspace ${workspace_id} no longer exists.${NC}"
+    echo ""
+    echo "Available workspaces:"
+    cmux_list_workspaces | jq -r '.[] | "  \(.id // .uuid)  \(.title // .name // "untitled")"'
+    echo ""
+    echo "Options:"
+    echo "  1. Run 'cmux-ws restore ${name}' to create a fresh workspace"
+    echo "  2. Update state manually"
+    exit 1
+  fi
+
+  # Load saved pane map and live surfaces
+  local pane_map live_surfaces
+  pane_map=$(state_get_pane_map "$name")
+  live_surfaces=$(cmux_list_surfaces "$workspace_id")
+
+  # Send commands to each pane
+  echo -e "${GREEN}Sending commands to existing panes...${NC}"
+  local i=0
+  while [[ "$i" -lt "$pane_count" ]]; do
+    local pane_id dir command
+    pane_id=$(config_get_pane_field "$config_json" "$i" "id")
+    dir=$(config_get_pane_field "$config_json" "$i" "dir")
+    command=$(config_get_pane_field "$config_json" "$i" "command")
+
+    # Look up surface ID from saved state
+    local surface_id
+    surface_id=$(echo "$pane_map" | jq -r --arg pane "$pane_id" '.[$pane] // empty')
+
+    if [[ -z "$surface_id" ]]; then
+      # Fallback: position-based matching
+      surface_id=$(echo "$live_surfaces" | jq -r ".[$i].id // .[$i].uuid // empty")
+      if [[ -n "$surface_id" && "$surface_id" != "null" ]]; then
+        echo -e "  ${YELLOW}${pane_id}: matched by position → ${surface_id}${NC}"
+        state_save_pane_map "$name" "$pane_id" "$surface_id"
+      else
+        echo -e "  ${RED}${pane_id}: no matching surface found, skipping${NC}"
+        ((i++))
+        continue
+      fi
+    fi
+
+    # Verify surface still exists in the workspace
+    local surf_exists
+    surf_exists=$(echo "$live_surfaces" | jq --arg id "$surface_id" \
+      '[.[] | select(.id == $id or .uuid == $id)] | length')
+
+    if [[ "$surf_exists" -eq 0 ]]; then
+      echo -e "  ${RED}${pane_id}: surface ${surface_id} no longer exists, skipping${NC}"
+      ((i++))
+      continue
+    fi
+
+    if [[ -n "$dir" || -n "$command" ]]; then
+      echo -e "  ${pane_id}: ${command:-<shell>}"
+      cmux_send_command "$surface_id" "$dir" "$command"
+      sleep 0.3
+    fi
+
+    ((i++))
+  done
+
+  # Focus designated pane
+  if [[ -n "$focus_pane" ]]; then
+    local focus_surface
+    focus_surface=$(echo "$pane_map" | jq -r --arg pane "$focus_pane" '.[$pane] // empty')
+    if [[ -n "$focus_surface" ]]; then
+      echo ""
+      echo -e "Focusing: ${focus_pane}"
+      cmux_focus_surface "$focus_surface"
+    fi
+  fi
+
+  echo ""
+  echo -e "${BOLD}Workspace reattached: ${ws_name}${NC}"
+}
+
+cmd_sync() {
+  require_cmux_ws_dir
+
+  (
+    cd "$CMUX_WS_DIR"
+    if [[ -z "$(git status --porcelain)" ]]; then
+      echo -e "${YELLOW}No changes to sync.${NC}"
+      return
+    fi
+
+    git add -A
+    git commit -m "Update workspace configs"
+
+    if git remote get-url origin &>/dev/null; then
+      git push
+      echo -e "${GREEN}Pushed to remote.${NC}"
+    else
+      echo -e "${YELLOW}No remote configured. Changes committed locally.${NC}"
+      echo "Add a remote: cd ${CMUX_WS_DIR} && git remote add origin <url>"
+    fi
+  )
+}
+
+cmd_pull() {
+  require_cmux_ws_dir
+
+  (
+    cd "$CMUX_WS_DIR"
+    if ! git remote get-url origin &>/dev/null; then
+      echo -e "${RED}No remote configured.${NC}"
+      echo "Add one: cd ${CMUX_WS_DIR} && git remote add origin <url>"
+      exit 1
+    fi
+
+    git pull --rebase
+    echo -e "${GREEN}Configs updated.${NC}"
+  )
+}
+
+# --------------------------------------------------------------------------
+# Main dispatch
+# --------------------------------------------------------------------------
+
+[[ $# -lt 1 ]] && usage
+
+command="$1"
+shift
+
+case "$command" in
+  init)      cmd_init ;;
+  scaffold)  cmd_scaffold "$@" ;;
+  restore)   cmd_restore "$@" ;;
+  reattach)  cmd_reattach "$@" ;;
+  list)      cmd_list ;;
+  edit)      cmd_edit "$@" ;;
+  sync)      cmd_sync ;;
+  pull)      cmd_pull ;;
+  help)      usage ;;
+  *)         echo "Unknown command: $command"; usage ;;
+esac
