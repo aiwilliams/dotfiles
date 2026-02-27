@@ -19,11 +19,11 @@ DIR_ANCHOR=39 # directory anchor (last component) foreground
 VCS_CLEAN=76  # git clean
 META=244      # grey meta text
 
-# Powerline glyphs
-SEP=$'\uE0B0'       #
-SEP_START=$'\uE0B6'  #
-SUBSEP=$'\uE0B1'     #
-BRANCH=$'\uF126'     #
+# Powerline glyphs (use raw UTF-8 bytes — \u escapes fail in POSIX locale)
+SEP=$'\xEE\x82\xB0'
+SEP_START=$'\xEE\x82\xB6'
+SUBSEP=$'\xEE\x82\xB1'
+BRANCH=$'\xEF\x84\xA6'
 
 # --- OS icon segment ---
 os_icon=""
