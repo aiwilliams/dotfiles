@@ -76,7 +76,29 @@ sudo sed -i 's/^\(host\s\+all\s\+all\s\+127\.0\.0\.1\/32\s\+\)ident/\1md5/' "$PG
 sudo sed -i 's/^\(host\s\+all\s\+all\s\+127\.0\.0\.1\/32\s\+\)scram-sha-256/\1md5/' "$PG_HBA"
 sudo sed -i 's/^\(host\s\+all\s\+all\s\+::1\/128\s\+\)ident/\1md5/' "$PG_HBA"
 sudo sed -i 's/^\(host\s\+all\s\+all\s\+::1\/128\s\+\)scram-sha-256/\1md5/' "$PG_HBA"
-sudo systemctl reload postgresql
+
+# Allow Docker containers to connect to PostgreSQL
+# 1. Add Docker bridge IP to listen_addresses in postgresql.conf
+PG_CONF=$(sudo -u postgres psql -tAc "SHOW config_file;")
+DOCKER_BRIDGE="172.17.0.1"
+DOCKER_SUBNET="172.17.0.0/16"
+
+CURRENT_LISTEN=$(sudo grep -E "^listen_addresses\s*=" "$PG_CONF" 2>/dev/null || true)
+if [[ -z "$CURRENT_LISTEN" ]]; then
+  # No explicit listen_addresses — add one with localhost + Docker bridge
+  echo "listen_addresses = 'localhost,$DOCKER_BRIDGE'" | sudo tee -a "$PG_CONF" > /dev/null
+elif ! echo "$CURRENT_LISTEN" | grep -qF "$DOCKER_BRIDGE"; then
+  # listen_addresses exists but doesn't include Docker bridge — append it
+  sudo sed -i "s/^\(listen_addresses\s*=\s*'\)\([^']*\)'/\1\2,$DOCKER_BRIDGE'/" "$PG_CONF"
+fi
+
+# 2. Add pg_hba rule for Docker subnet (idempotent — skip if already present)
+if ! sudo grep -qE "^host\s+all\s+all\s+${DOCKER_SUBNET//\//\\/}\s" "$PG_HBA"; then
+  echo "host    all             all             $DOCKER_SUBNET            md5" | sudo tee -a "$PG_HBA" > /dev/null
+fi
+
+# listen_addresses requires a full restart (not just reload) to take effect
+sudo systemctl restart postgresql
 
 # Create main worktree databases (no sudo needed from here)
 source "$SCRIPT_DIR/lib/postgres.sh"
