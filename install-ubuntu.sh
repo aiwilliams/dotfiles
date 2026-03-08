@@ -8,7 +8,7 @@ echo "Running Ubuntu setup..."
 # --- System packages ---
 
 sudo apt-get update -y
-sudo apt-get install -y zsh tmux keychain build-essential python3 curl ca-certificates fzf shellcheck docker.io
+sudo apt-get install -y zsh tmux keychain build-essential python3 curl ca-certificates fzf shellcheck docker.io docker-compose-v2
 
 # --- Docker ---
 
