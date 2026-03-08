@@ -97,7 +97,15 @@ if ! sudo grep -qE "^host\s+all\s+all\s+${DOCKER_SUBNET//\//\\/}\s" "$PG_HBA"; t
   echo "host    all             all             $DOCKER_SUBNET            md5" | sudo tee -a "$PG_HBA" > /dev/null
 fi
 
-# listen_addresses requires a full restart (not just reload) to take effect
+# Increase max_connections for concurrent test suites (default 100 is too low)
+CURRENT_MAX_CONN=$(sudo grep -E "^max_connections\s*=" "$PG_CONF" 2>/dev/null || true)
+if [[ -z "$CURRENT_MAX_CONN" ]]; then
+  echo "max_connections = 300" | sudo tee -a "$PG_CONF" > /dev/null
+else
+  sudo sed -i "s/^max_connections\s*=.*/max_connections = 300/" "$PG_CONF"
+fi
+
+# listen_addresses and max_connections require a full restart (not just reload)
 sudo systemctl restart postgresql
 
 # Create main worktree databases (no sudo needed from here)
