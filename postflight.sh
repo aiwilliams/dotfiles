@@ -3,9 +3,13 @@
 # Safe to run anytime, not just after install.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PASS="✓"
 FAIL="✗"
 WARN="!"
+# SAFETY: commands[] strings are eval'd in the summary. Only add hardcoded
+# strings with trusted variable expansions. Never include external input.
 commands=()
 manual_steps=()
 
@@ -65,11 +69,22 @@ else
 fi
 
 ALLOWED_SIGNERS="$HOME/.ssh/allowed_signers"
-if [ -n "$(git config --global gpg.ssh.allowedSignersFile 2>/dev/null || true)" ] && [ -f "$ALLOWED_SIGNERS" ]; then
-  pass "allowedSignersFile configured"
+CONFIGURED_SIGNERS="$(git config --global gpg.ssh.allowedSignersFile 2>/dev/null || true)"
+if [ "$CONFIGURED_SIGNERS" = "$ALLOWED_SIGNERS" ] && [ -f "$ALLOWED_SIGNERS" ]; then
+  if [ -f "$SSH_KEY.pub" ]; then
+    LOCAL_KEY_DATA=$(awk '{print $2}' "$SSH_KEY.pub")
+    if grep -qF "$LOCAL_KEY_DATA" "$ALLOWED_SIGNERS"; then
+      pass "allowedSignersFile configured with current key"
+    else
+      fail "allowedSignersFile missing current key" \
+        "source \"$SCRIPT_DIR/configure.sh\""
+    fi
+  else
+    pass "allowedSignersFile configured"
+  fi
 else
   fail "allowedSignersFile not configured (local signature verification won't work)" \
-    "source ./configure.sh"
+    "source \"$SCRIPT_DIR/configure.sh\""
 fi
 
 # --- GitHub CLI ---
@@ -111,7 +126,7 @@ else
 
   # Check signing key: create a test signature and verify via GitHub's API
   TMPFILE=$(mktemp)
-  SIGFILE=$(mktemp)
+  trap 'rm -f "$TMPFILE" "${TMPFILE}.sig"' EXIT
   echo "postflight-test" > "$TMPFILE"
   if ssh-keygen -Y sign -f "$SSH_KEY" -n git "$TMPFILE" > /dev/null 2>&1; then
     # Use the API (read-only, no special scopes) to check signing keys.
@@ -132,7 +147,6 @@ else
   else
     warn "Signing key: ssh-keygen sign test failed"
   fi
-  rm -f "$TMPFILE" "$SIGFILE" "${TMPFILE}.sig"
 fi
 
 # --- Summary ---

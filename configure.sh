@@ -17,12 +17,20 @@ if [ -f "$SSH_KEY" ]; then
   # Allowed signers file for local signature verification
   ALLOWED_SIGNERS="$HOME/.ssh/allowed_signers"
   GIT_EMAIL="$(git config --global user.email || true)"
-  if [ -n "$GIT_EMAIL" ]; then
+  if [ -z "$GIT_EMAIL" ]; then
+    echo "WARNING: git user.email not set, skipping allowed signers setup"
+    echo "  Run: git config --global user.email you@example.com" # gitleaks:allow
+    echo "  Then re-run ./configure.sh to enable local signature verification"
+  elif [ ! -f "$SSH_KEY.pub" ]; then
+    echo "WARNING: Public key $SSH_KEY.pub not found, skipping allowed signers setup"
+    echo "  Regenerate with: ssh-keygen -y -f \"$SSH_KEY\" > \"$SSH_KEY.pub\""
+  else
     PUBKEY="$(cat "$SSH_KEY.pub")"
     SIGNER_LINE="$GIT_EMAIL $PUBKEY"
     if [ ! -f "$ALLOWED_SIGNERS" ] || ! grep -qF "$PUBKEY" "$ALLOWED_SIGNERS"; then
       echo "$SIGNER_LINE" >> "$ALLOWED_SIGNERS"
     fi
+    chmod 644 "$ALLOWED_SIGNERS"
     git config --global gpg.ssh.allowedSignersFile "$ALLOWED_SIGNERS"
   fi
 
