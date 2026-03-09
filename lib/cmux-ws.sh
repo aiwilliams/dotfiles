@@ -132,21 +132,21 @@ cmux_current_workspace_id() {
 }
 
 cmux_list_workspaces() {
-  cmux_api_json list-workspaces
+  cmux_api_json list-workspaces | jq '.workspaces'
 }
 
 cmux_list_panes() {
   local workspace_id="${1:-}"
   if [[ -n "$workspace_id" ]]; then
-    cmux_api_json list-panes --workspace "$workspace_id"
+    cmux_api_json list-panes --workspace "$workspace_id" | jq '.panes'
   else
-    cmux_api_json list-panes
+    cmux_api_json list-panes | jq '.panes'
   fi
 }
 
 cmux_list_pane_surfaces() {
   local pane_id="$1"
-  cmux_api_json list-pane-surfaces --pane "$pane_id"
+  cmux_api_json list-pane-surfaces --pane "$pane_id" | jq '.surfaces'
 }
 
 cmux_focus_pane() {
@@ -190,15 +190,18 @@ cmux_send_command() {
   local dir="$2"
   local command="$3"
 
-  if [[ -n "$dir" ]]; then
-    local expanded_dir="${dir/#\~/$HOME}"
-    cmux_send_text "$surface_id" "cd ${expanded_dir}"
-    cmux_send_key "$surface_id" enter
-    sleep 0.2
-  fi
-
   if [[ -n "$command" ]]; then
     cmux_send_text "$surface_id" "$command"
+    cmux_send_key "$surface_id" enter
+  fi
+
+  if [[ -n "$dir" ]]; then
+    # Wait for command to start (e.g. SSH to connect) before sending cd
+    if [[ -n "$command" ]]; then
+      sleep 2
+    fi
+    local expanded_dir="${dir/#\~/$HOME}"
+    cmux_send_text "$surface_id" "cd ${expanded_dir}"
     cmux_send_key "$surface_id" enter
   fi
 }

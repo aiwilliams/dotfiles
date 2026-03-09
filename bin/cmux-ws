@@ -167,7 +167,7 @@ cmd_scaffold() {
 
   # Get panes in current workspace
   local panes_json
-  panes_json=$("$CMUX_CLI" --json --id-format uuids list-panes 2>/dev/null) || {
+  panes_json=$("$CMUX_CLI" --json --id-format uuids list-panes 2>/dev/null | jq '.panes') || {
     echo -e "${RED}Failed to list panes.${NC}"
     exit 1
   }
