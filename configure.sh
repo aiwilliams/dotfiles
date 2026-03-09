@@ -6,6 +6,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 git config --global init.defaultBranch main
 
+# Commit signing with SSH key (uses the per-host key from install.sh)
+SSH_KEY="$HOME/.ssh/id_ed25519_$(hostname)"
+if [ -f "$SSH_KEY" ]; then
+  git config --global gpg.format ssh
+  git config --global user.signingkey "$SSH_KEY.pub"
+  git config --global commit.gpgsign true
+  git config --global tag.gpgsign true
+  echo "Configured git commit signing with $SSH_KEY"
+else
+  echo "WARNING: SSH key $SSH_KEY not found, skipping commit signing setup"
+fi
+
 # Shell environment variables
 if ! grep -qF "NX_TUI" "$HOME/.bashrc"; then
   echo '' >> "$HOME/.bashrc"

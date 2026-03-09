@@ -7,11 +7,6 @@ SSH_KEY="$HOME/.ssh/id_ed25519_$(hostname)"
 if [ ! -f "$SSH_KEY" ]; then
   echo "Generating SSH key: $SSH_KEY"
   ssh-keygen -t ed25519 -f "$SSH_KEY" -C "$(whoami)@$(hostname)"
-  echo ""
-  echo "Add this public key to your GitHub profile:"
-  echo ""
-  cat "$SSH_KEY.pub"
-  echo ""
 fi
 
 # Platform-specific system packages + postgres
@@ -42,3 +37,6 @@ source "$SCRIPT_DIR/lib/zsh.sh"
 
 # Shell config, symlinks, hooks
 source "$SCRIPT_DIR/configure.sh"
+
+echo ""
+echo "Install complete. Run ./postflight.sh to verify GitHub SSH keys and commit signing."

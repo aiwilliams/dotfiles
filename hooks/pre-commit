@@ -21,6 +21,7 @@ skip_secrets=(
   config/zsh/.p10k.zsh  # Generated config with example comments that trigger false positives
   lib/postgres.sh       # Template variables like POSTGRES_PASSWORD="${user}" are not secrets
   hooks/pre-commit      # Contains secret patterns as literal strings, not actual secrets
+  postflight.sh         # git@github.com triggers email pattern false positive
 )
 
 while IFS= read -r file; do
