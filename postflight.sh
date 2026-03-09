@@ -92,7 +92,7 @@ if ! [ -f "$SSH_KEY.pub" ]; then
   warn "Skipping — no local SSH key to check"
 else
   # Check authentication key: ssh to github.com returns exit 1 with a greeting on success
-  SSH_OUTPUT=$(ssh -T -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new git@github.com 2>&1 || true)
+  SSH_OUTPUT=$(ssh -T -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new git@github.com 2>&1 || true) # gitleaks:allow
   if echo "$SSH_OUTPUT" | grep -qi "successfully authenticated"; then
     pass "Authentication key on GitHub"
   else

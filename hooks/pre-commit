@@ -5,40 +5,15 @@ set -euo pipefail
 
 failed=0
 
-# --- Secrets detection ---
+# --- Secrets detection (gitleaks) ---
 
-secret_patterns=(
-  'sk-[A-Za-z0-9]{20,}'
-  'AKIA[0-9A-Z]{16}'
-  'ghp_[A-Za-z0-9]{36,}'
-  'xox[bpras]-[A-Za-z0-9-]+'
-  '(SECRET|TOKEN|PASSWORD|API_KEY|PRIVATE_KEY)\s*=\s*[^\s]+'
-  '/home/[a-zA-Z0-9_-]+/'
-  '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-)
-
-skip_secrets=(
-  config/zsh/.p10k.zsh  # Generated config with example comments that trigger false positives
-  lib/postgres.sh       # Template variables like POSTGRES_PASSWORD="${user}" are not secrets
-  hooks/pre-commit      # Contains secret patterns as literal strings, not actual secrets
-  postflight.sh         # git@github.com triggers email pattern false positive
-)
-
-while IFS= read -r file; do
-  skip=0
-  for s in "${skip_secrets[@]}"; do
-    [[ "$file" == "$s" ]] && skip=1 && break
-  done
-  [ "$skip" -eq 1 ] && continue
-
-  content="$(git show ":$file" 2>/dev/null)" || continue
-  for pattern in "${secret_patterns[@]}"; do
-    if echo "$content" | grep -qEi "$pattern"; then
-      echo "BLOCKED: Potential secret or personal data in $file (pattern: $pattern)"
-      failed=1
-    fi
-  done
-done < <(git diff --cached --name-only --diff-filter=ACM)
+if command -v gitleaks &>/dev/null; then
+  if ! gitleaks git --pre-commit --staged --redact --verbose; then
+    failed=1
+  fi
+else
+  echo "Warning: gitleaks not installed, skipping secret scan"
+fi
 
 # --- Shellcheck ---
 

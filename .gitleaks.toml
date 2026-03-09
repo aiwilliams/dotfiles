@@ -1,0 +1,24 @@
+[extend]
+useDefault = true
+
+# Custom rules for personal data patterns (not covered by default rules)
+
+[[rules]]
+id = "home-directory-path"
+description = "Hardcoded home directory path"
+regex = '''/home/[a-zA-Z0-9_-]+/'''
+tags = ["personal-data"]
+
+[[rules]]
+id = "email-address"
+description = "Email address"
+regex = '''[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'''
+keywords = ["@"]
+tags = ["personal-data"]
+
+# Global allowlist for files with expected false positives
+[[allowlists]]
+description = "Generated configs and templates"
+paths = [
+  '''config/zsh/\.p10k\.zsh''',
+]

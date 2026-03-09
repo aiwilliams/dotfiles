@@ -112,6 +112,15 @@ sudo systemctl restart postgresql
 source "$SCRIPT_DIR/lib/postgres.sh"
 pg_create_worktree_dbs "main"
 
+# --- gitleaks ---
+
+if ! command -v gitleaks &>/dev/null; then
+  echo "Installing gitleaks..."
+  GITLEAKS_VERSION="8.30.0"
+  curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+    | sudo tar -xz -C /usr/local/bin gitleaks
+fi
+
 # --- zmx ---
 
 if ! command -v zmx &>/dev/null; then
