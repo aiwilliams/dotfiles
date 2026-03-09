@@ -64,6 +64,14 @@ else
     "git config --global tag.gpgsign true"
 fi
 
+ALLOWED_SIGNERS="$HOME/.ssh/allowed_signers"
+if [ -n "$(git config --global gpg.ssh.allowedSignersFile 2>/dev/null || true)" ] && [ -f "$ALLOWED_SIGNERS" ]; then
+  pass "allowedSignersFile configured"
+else
+  fail "allowedSignersFile not configured (local signature verification won't work)" \
+    "source ./configure.sh"
+fi
+
 # --- GitHub CLI ---
 
 section "GitHub CLI"

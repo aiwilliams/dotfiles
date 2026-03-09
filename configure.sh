@@ -13,6 +13,19 @@ if [ -f "$SSH_KEY" ]; then
   git config --global user.signingkey "$SSH_KEY.pub"
   git config --global commit.gpgsign true
   git config --global tag.gpgsign true
+
+  # Allowed signers file for local signature verification
+  ALLOWED_SIGNERS="$HOME/.ssh/allowed_signers"
+  GIT_EMAIL="$(git config --global user.email || true)"
+  if [ -n "$GIT_EMAIL" ]; then
+    PUBKEY="$(cat "$SSH_KEY.pub")"
+    SIGNER_LINE="$GIT_EMAIL $PUBKEY"
+    if [ ! -f "$ALLOWED_SIGNERS" ] || ! grep -qF "$PUBKEY" "$ALLOWED_SIGNERS"; then
+      echo "$SIGNER_LINE" >> "$ALLOWED_SIGNERS"
+    fi
+    git config --global gpg.ssh.allowedSignersFile "$ALLOWED_SIGNERS"
+  fi
+
   echo "Configured git commit signing with $SSH_KEY"
 else
   echo "WARNING: SSH key $SSH_KEY not found, skipping commit signing setup"
