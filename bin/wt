@@ -375,7 +375,7 @@ cmd_create() {
   echo ""
   pg_clone_worktree_dbs "$wt_id"
 
-  # Update .env with worktree-specific vars (setup.sh copies .env from main via post-checkout hook)
+  # Update .env with worktree-specific vars
   local wt_env
   wt_env=$(env_file_for "$wt_dir")
   write_env_vars "$wt_env" "$wt_id" "$port"
