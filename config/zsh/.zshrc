@@ -42,7 +42,7 @@ esac
 
 # --- Tools ---
 
-eval "$(~/.local/bin/mise activate zsh)"
+eval "$(mise activate zsh)"
 
 # --- Local overrides (not version-controlled) ---
 
