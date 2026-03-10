@@ -19,18 +19,19 @@ manual() { echo "  $FAIL $1"; manual_steps+=("$2"); }
 warn() { echo "  $WARN $1"; }
 section() { echo ""; echo "$1"; }
 
-SSH_KEY="$HOME/.ssh/id_ed25519_$(hostname)"
-KEY_TITLE="$(whoami)@$(hostname)"
+source "$SCRIPT_DIR/lib/ssh-signing-key.sh"
 
 # --- SSH Key ---
 
 section "SSH Key"
 
-if [ -f "$SSH_KEY" ]; then
-  pass "Key exists: $SSH_KEY"
+if resolve_signing_key; then
+  SSH_KEY="$SSH_SIGNING_KEY"
+  pass "Key found: $SSH_KEY"
 else
-  fail "Key missing: $SSH_KEY" \
-    "ssh-keygen -t ed25519 -f \"$SSH_KEY\" -C \"$KEY_TITLE\""
+  SSH_KEY=""
+  fail "No SSH key found" \
+    "ssh-keygen -t ed25519 -f \"$HOME/.ssh/id_ed25519\" -C \"$(whoami)@$(hostname)\""
 fi
 
 # --- Git Signing ---
@@ -45,13 +46,18 @@ else
 fi
 
 CONFIGURED_KEY="$(git config --global user.signingkey 2>/dev/null || true)"
-if [ "$CONFIGURED_KEY" = "$SSH_KEY.pub" ]; then
+if [ -n "$SSH_KEY" ] && [ "$CONFIGURED_KEY" = "$SSH_KEY.pub" ]; then
   pass "user.signingkey = $SSH_KEY.pub"
+elif [ -n "$CONFIGURED_KEY" ] && [ -f "${CONFIGURED_KEY%.pub}" ]; then
+  pass "user.signingkey = $CONFIGURED_KEY"
 elif [ -n "$CONFIGURED_KEY" ]; then
-  warn "user.signingkey set to $CONFIGURED_KEY (expected $SSH_KEY.pub)"
-else
+  warn "user.signingkey set to $CONFIGURED_KEY but key file not found"
+elif [ -n "$SSH_KEY" ]; then
   fail "user.signingkey not set" \
     "git config --global user.signingkey \"$SSH_KEY.pub\""
+else
+  fail "user.signingkey not set" \
+    "source \"$SCRIPT_DIR/configure.sh\""
 fi
 
 if [ "$(git config --global commit.gpgsign 2>/dev/null)" = "true" ]; then
@@ -71,7 +77,7 @@ fi
 ALLOWED_SIGNERS="$HOME/.ssh/allowed_signers"
 CONFIGURED_SIGNERS="$(git config --global gpg.ssh.allowedSignersFile 2>/dev/null || true)"
 if [ "$CONFIGURED_SIGNERS" = "$ALLOWED_SIGNERS" ] && [ -f "$ALLOWED_SIGNERS" ]; then
-  if [ -f "$SSH_KEY.pub" ]; then
+  if [ -n "$SSH_KEY" ] && [ -f "$SSH_KEY.pub" ]; then
     LOCAL_KEY_DATA=$(awk '{print $2}' "$SSH_KEY.pub")
     if grep -qF "$LOCAL_KEY_DATA" "$ALLOWED_SIGNERS"; then
       pass "allowedSignersFile configured with current key"
@@ -111,7 +117,7 @@ fi
 
 section "GitHub SSH Keys"
 
-if ! [ -f "$SSH_KEY.pub" ]; then
+if [ -z "$SSH_KEY" ] || ! [ -f "$SSH_KEY.pub" ]; then
   warn "Skipping — no local SSH key to check"
 else
   # Check authentication key: ssh to github.com returns exit 1 with a greeting on success
@@ -124,28 +130,13 @@ else
         $(cat "$SSH_KEY.pub")"
   fi
 
-  # Check signing key: create a test signature and verify via GitHub's API
-  TMPFILE=$(mktemp)
-  trap 'rm -f "$TMPFILE" "${TMPFILE}.sig"' EXIT
-  echo "postflight-test" > "$TMPFILE"
-  if ssh-keygen -Y sign -f "$SSH_KEY" -n git "$TMPFILE" > /dev/null 2>&1; then
-    # Use the API (read-only, no special scopes) to check signing keys.
-    if gh auth status &>/dev/null 2>&1; then
-      GH_LOGIN=$(gh auth status 2>&1 | grep "account" | head -1 | sed 's/.*account //' | awk '{print $1}')
-      SIGNING_KEYS=$(gh api "users/$GH_LOGIN/ssh_signing_keys" --jq '.[].key' 2>/dev/null || true)
-      LOCAL_KEY_DATA=$(awk '{print $2}' "$SSH_KEY.pub")
-      if echo "$SIGNING_KEYS" | grep -qF "$LOCAL_KEY_DATA"; then
-        pass "Signing key on GitHub"
-      else
-        manual "Signing key not on GitHub" \
-          "Add as Signing Key at https://github.com/settings/ssh/new
-        $(cat "$SSH_KEY.pub")"
-      fi
-    else
-      warn "Signing key: cannot verify (gh not authenticated)"
-    fi
+  # Check signing key using the result from resolve_signing_key
+  if [ "$SSH_SIGNING_KEY_ON_GITHUB" = "true" ]; then
+    pass "Signing key on GitHub"
   else
-    warn "Signing key: ssh-keygen sign test failed"
+    manual "Signing key not on GitHub" \
+      "Add as Signing Key at https://github.com/settings/ssh/new
+        $(cat "$SSH_KEY.pub")"
   fi
 fi
 

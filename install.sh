@@ -3,10 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-SSH_KEY="$HOME/.ssh/id_ed25519_$(hostname)"
-if [ ! -f "$SSH_KEY" ]; then
-  echo "Generating SSH key: $SSH_KEY"
-  ssh-keygen -t ed25519 -f "$SSH_KEY" -C "$(whoami)@$(hostname)"
+source "$SCRIPT_DIR/lib/ssh-signing-key.sh"
+if ! resolve_signing_key; then
+  echo "No SSH key found."
+  read -rp "Generate a new key? [Y/n] " answer
+  if [[ ! "$answer" =~ ^[Nn]$ ]]; then
+    SSH_KEY="$HOME/.ssh/id_ed25519_$(hostname)"
+    echo "Generating SSH key: $SSH_KEY"
+    ssh-keygen -t ed25519 -f "$SSH_KEY" -C "$(whoami)@$(hostname)"
+  fi
 fi
 
 # Platform-specific system packages + postgres

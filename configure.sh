@@ -6,9 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 git config --global init.defaultBranch main
 
-# Commit signing with SSH key (uses the per-host key from install.sh)
-SSH_KEY="$HOME/.ssh/id_ed25519_$(hostname)"
-if [ -f "$SSH_KEY" ]; then
+# Commit signing with SSH key
+source "$SCRIPT_DIR/lib/ssh-signing-key.sh"
+if resolve_signing_key; then
+  SSH_KEY="$SSH_SIGNING_KEY"
   git config --global gpg.format ssh
   git config --global user.signingkey "$SSH_KEY.pub"
   git config --global commit.gpgsign true
@@ -26,17 +27,37 @@ if [ -f "$SSH_KEY" ]; then
     echo "  Regenerate with: ssh-keygen -y -f \"$SSH_KEY\" > \"$SSH_KEY.pub\""
   else
     PUBKEY="$(cat "$SSH_KEY.pub")"
-    SIGNER_LINE="$GIT_EMAIL $PUBKEY"
-    if [ ! -f "$ALLOWED_SIGNERS" ] || ! grep -qF "$PUBKEY" "$ALLOWED_SIGNERS"; then
-      echo "$SIGNER_LINE" >> "$ALLOWED_SIGNERS"
+    SIGNING_EMAILS_FILE="$HOME/.config/git/signing-emails"
+    EMAILS=("$GIT_EMAIL")
+    if [ -f "$SIGNING_EMAILS_FILE" ]; then
+      while IFS= read -r email; do
+        [ -n "$email" ] && EMAILS+=("$email")
+      done < "$SIGNING_EMAILS_FILE"
+    fi
+    for email in "${EMAILS[@]}"; do
+      if [ ! -f "$ALLOWED_SIGNERS" ] || ! grep -qF "$email $PUBKEY" "$ALLOWED_SIGNERS"; then
+        echo "$email $PUBKEY" >> "$ALLOWED_SIGNERS"
+        echo "  Added allowed signer for $email"
+      fi
+    done
+    if [ ! -f "$SIGNING_EMAILS_FILE" ]; then
+      echo "  Tip: Add extra emails to ~/.config/git/signing-emails for repos that use a different user.email"
     fi
     chmod 644 "$ALLOWED_SIGNERS"
     git config --global gpg.ssh.allowedSignersFile "$ALLOWED_SIGNERS"
   fi
 
   echo "Configured git commit signing with $SSH_KEY"
+  if [ "$SSH_SIGNING_KEY_ON_GITHUB" = "false" ]; then
+    echo "Note: This key is not yet registered as a signing key on GitHub"
+    echo "  Add it at https://github.com/settings/ssh/new"
+    echo "  Public key:"
+    echo "  $(cat "$SSH_KEY.pub")"
+  fi
 else
-  echo "WARNING: SSH key $SSH_KEY not found, skipping commit signing setup"
+  echo "WARNING: No SSH key found, skipping commit signing setup"
+  echo "  Generate one with: ssh-keygen -t ed25519"
+  echo "  Then re-run ./configure.sh"
 fi
 
 # Shell environment variables
