@@ -6,6 +6,7 @@
 #
 # Usage:
 #   wt create <branch>            Create worktree with auto-numbered ID on a branch
+#   wt create --gt-get <branch>   Fetch branch via Graphite, then create worktree
 #   wt create --detach            Create worktree in detached HEAD state
 #   wt checkout                   Pick a remote branch (yours) to check out as a worktree
 #   wt remove [N|wtN]             Remove worktree + drop DBs (fzf picker if no arg)
@@ -179,6 +180,7 @@ Usage: wt <command> [args]
 
 Commands:
   create <branch>            Create worktree on a branch (or --detach for detached HEAD)
+  create --gt-get <branch>   Fetch branch via Graphite, then create worktree
   checkout                   Pick a remote branch (yours) to check out as a worktree
   remove [N|wtN]             Remove worktree and drop DBs (interactive picker if no arg)
   list                       List all worktrees with ID, branch, port, and status
@@ -215,16 +217,20 @@ THE wtN NUMBERING SYSTEM
 COMMANDS
 
   wt create <branch>
+  wt create --gt-get <branch>
   wt create --detach
 
     Create a new worktree with the next available wtN identifier. A branch
     name is required — the worktree checks out or creates that branch, copies
     .env from main, clones databases, and runs scripts/setup.sh if present.
-    Use --detach for the rare case of a detached HEAD worktree.
+    Use --gt-get to fetch the branch (and its stack) via Graphite before
+    creating the worktree — useful for branches tracked by Graphite or on
+    a remote you haven't fetched yet. Use --detach for a detached HEAD worktree.
 
     Examples:
-      wt create my-feature   # worktree on branch my-feature
-      wt create --detach     # detached worktree at next wtN
+      wt create my-feature                              # worktree on branch my-feature
+      wt create --gt-get improve/preflight-port-check   # fetch via Graphite first
+      wt create --detach                                # detached worktree at next wtN
 
   wt checkout
 
@@ -309,12 +315,17 @@ EOF
 cmd_create() {
   local branch=""
   local detach=false
+  local gt_get=false
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --detach)
         detach=true
+        shift
+        ;;
+      --gt-get)
+        gt_get=true
         shift
         ;;
       -*)
@@ -335,13 +346,24 @@ cmd_create() {
   if [[ -z "$branch" ]] && [[ "$detach" == false ]]; then
     echo -e "${RED}Error: branch name required${NC}"
     echo ""
-    echo "Usage: wt create <branch>        Create worktree on a branch"
-    echo "       wt create --detach        Create worktree in detached HEAD state"
+    echo "Usage: wt create <branch>           Create worktree on a branch"
+    echo "       wt create --gt-get <branch>  Fetch branch via Graphite first"
+    echo "       wt create --detach           Create worktree in detached HEAD state"
     exit 1
   fi
 
   if [[ -n "$branch" ]] && [[ "$detach" == true ]]; then
     echo -e "${RED}Error: cannot specify both a branch and --detach${NC}"
+    exit 1
+  fi
+
+  if [[ "$gt_get" == true ]] && [[ -z "$branch" ]]; then
+    echo -e "${RED}Error: --gt-get requires a branch name${NC}"
+    exit 1
+  fi
+
+  if [[ "$gt_get" == true ]] && [[ "$detach" == true ]]; then
+    echo -e "${RED}Error: cannot use --gt-get with --detach${NC}"
     exit 1
   fi
 
@@ -364,6 +386,22 @@ cmd_create() {
   echo -e "${GREEN}Git worktree:${NC} $wt_dir"
   if [[ "$detach" == true ]]; then
     git worktree add "$wt_dir" --detach
+  elif [[ "$gt_get" == true ]]; then
+    # Fetch branch (and its stack) via Graphite in the main worktree
+    if ! command -v gt &>/dev/null; then
+      echo -e "${RED}Error: gt (Graphite CLI) is required for --gt-get${NC}"
+      exit 1
+    fi
+    local main_dir
+    main_dir=$(main_worktree_dir)
+    local original_branch
+    original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
+    echo -e "${BOLD}Fetching branch via Graphite...${NC}"
+    (cd "$main_dir" && gt branch get "$branch")
+    # gt branch get checks out the branch — switch main back
+    (cd "$main_dir" && git checkout "$original_branch" 2>/dev/null)
+    # Branch now exists locally; create worktree on it
+    git worktree add "$wt_dir" "$branch"
   else
     git fetch origin "$branch" 2>/dev/null || true
     git worktree add "$wt_dir" "$branch" 2>/dev/null \
