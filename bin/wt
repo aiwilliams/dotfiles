@@ -375,76 +375,75 @@ cmd_create() {
   local port
   port=$(compute_port "$n")
 
-  {
-    if [[ "$detach" == true ]]; then
-      echo -e "${BOLD}Creating worktree ${wt_id} (detached)${NC}"
+  if [[ "$detach" == true ]]; then
+    echo -e "${BOLD}Creating worktree ${wt_id} (detached)${NC}"
+  else
+    echo -e "${BOLD}Creating worktree ${wt_id} for branch '${branch}'${NC}"
+  fi
+  echo ""
+
+  # Create git worktree
+  echo -e "${GREEN}Git worktree:${NC} $wt_dir"
+  if [[ "$detach" == true ]]; then
+    git worktree add "$wt_dir" --detach
+  elif [[ "$gt_get" == true ]]; then
+    # Fetch branch (and its stack) via Graphite in the main worktree
+    if ! command -v gt &>/dev/null; then
+      echo -e "${RED}Error: gt (Graphite CLI) is required for --gt-get${NC}"
+      exit 1
+    fi
+    local main_dir
+    main_dir=$(main_worktree_dir)
+    local original_branch
+    original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
+    echo -e "${BOLD}Fetching branch via Graphite...${NC}"
+    (cd "$main_dir" && gt get "$branch" --force)
+    # gt get checks out the branch — switch main back
+    (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
+    # Branch now exists locally; create worktree on it
+    git worktree add "$wt_dir" "$branch"
+  else
+    git fetch origin "$branch" 2>/dev/null || true
+    git worktree add "$wt_dir" "$branch" 2>/dev/null \
+      || git worktree add "$wt_dir" "origin/$branch" 2>/dev/null \
+      || git worktree add "$wt_dir" -b "$branch"
+  fi
+
+  # Clone databases from main
+  echo ""
+  pg_clone_worktree_dbs "$wt_id"
+
+  # Update .env with worktree-specific vars
+  local wt_env
+  wt_env=$(env_file_for "$wt_dir")
+  write_env_vars "$wt_env" "$wt_id" "$port"
+  echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL in .env${NC}"
+
+  # Track branch in Graphite (skip if --gt-get already set up tracking)
+  if [[ -n "$branch" ]] && [[ "$gt_get" == false ]] && command -v gt &>/dev/null; then
+    echo ""
+    echo -e "${BOLD}Tracking branch in Graphite...${NC}"
+    local pr_base=""
+    if command -v gh &>/dev/null; then
+      pr_base=$(gh pr view "$branch" --json baseRefName --jq '.baseRefName' 2>/dev/null) || true
+    fi
+    if [[ -n "${pr_base:-}" ]]; then
+      echo -e "  PR targets: ${pr_base}"
+      (cd "$wt_dir" && git rebase "origin/${pr_base}" 2>/dev/null; gt branch track --force --parent "$pr_base" 2>/dev/null) \
+        && echo -e "${GREEN}Tracked in Graphite (parent: ${pr_base})${NC}" \
+        || echo -e "${YELLOW}Graphite tracking skipped${NC}"
     else
-      echo -e "${BOLD}Creating worktree ${wt_id} for branch '${branch}'${NC}"
+      (cd "$wt_dir" && gt branch track --force 2>/dev/null) \
+        && echo -e "${GREEN}Tracked in Graphite${NC}" \
+        || echo -e "${YELLOW}Graphite tracking skipped (no PR found, used nearest ancestor)${NC}"
     fi
-    echo ""
+  fi
 
-    # Create git worktree
-    echo -e "${GREEN}Git worktree:${NC} $wt_dir"
-    if [[ "$detach" == true ]]; then
-      git worktree add "$wt_dir" --detach
-    elif [[ "$gt_get" == true ]]; then
-      # Fetch branch (and its stack) via Graphite in the main worktree
-      if ! command -v gt &>/dev/null; then
-        echo -e "${RED}Error: gt (Graphite CLI) is required for --gt-get${NC}"
-        exit 1
-      fi
-      local main_dir
-      main_dir=$(main_worktree_dir)
-      local original_branch
-      original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
-      echo -e "${BOLD}Fetching branch via Graphite...${NC}"
-      (cd "$main_dir" && gt get "$branch" --force)
-      # gt get checks out the branch — switch main back
-      (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
-      # Branch now exists locally; create worktree on it
-      git worktree add "$wt_dir" "$branch"
-    else
-      git fetch origin "$branch" 2>/dev/null || true
-      git worktree add "$wt_dir" "$branch" 2>/dev/null \
-        || git worktree add "$wt_dir" "origin/$branch" 2>/dev/null \
-        || git worktree add "$wt_dir" -b "$branch"
-    fi
+  echo ""
+  echo -e "${BOLD}Ready!${NC}"
 
-    # Clone databases from main
-    echo ""
-    pg_clone_worktree_dbs "$wt_id"
-
-    # Update .env with worktree-specific vars
-    local wt_env
-    wt_env=$(env_file_for "$wt_dir")
-    write_env_vars "$wt_env" "$wt_id" "$port"
-    echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL in .env${NC}"
-
-    # Track branch in Graphite (skip if --gt-get already set up tracking)
-    if [[ -n "$branch" ]] && [[ "$gt_get" == false ]] && command -v gt &>/dev/null; then
-      echo ""
-      echo -e "${BOLD}Tracking branch in Graphite...${NC}"
-      local pr_base=""
-      if command -v gh &>/dev/null; then
-        pr_base=$(gh pr view "$branch" --json baseRefName --jq '.baseRefName' 2>/dev/null) || true
-      fi
-      if [[ -n "${pr_base:-}" ]]; then
-        echo -e "  PR targets: ${pr_base}"
-        (cd "$wt_dir" && git rebase "origin/${pr_base}" 2>/dev/null; gt branch track --force --parent "$pr_base" 2>/dev/null) \
-          && echo -e "${GREEN}Tracked in Graphite (parent: ${pr_base})${NC}" \
-          || echo -e "${YELLOW}Graphite tracking skipped${NC}"
-      else
-        (cd "$wt_dir" && gt branch track --force 2>/dev/null) \
-          && echo -e "${GREEN}Tracked in Graphite${NC}" \
-          || echo -e "${YELLOW}Graphite tracking skipped (no PR found, used nearest ancestor)${NC}"
-      fi
-    fi
-
-    echo ""
-    echo -e "${BOLD}Ready!${NC}"
-  } >&2
-
-  echo "$wt_dir"
+  # Write path for shell wrapper to pick up for cd
+  echo "$wt_dir" > /tmp/wt_cd_path
 }
 
 cmd_checkout() {
