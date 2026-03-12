@@ -396,10 +396,10 @@ cmd_create() {
     main_dir=$(main_worktree_dir)
     local original_branch
     original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
-    echo -e "${BOLD}Fetching branch via Graphite (downstack get)...${NC}"
-    (cd "$main_dir" && gt downstack get "$branch" --force)
-    # downstack get checks out the branch — switch main back
-    (cd "$main_dir" && git checkout "$original_branch" 2>/dev/null)
+    echo -e "${BOLD}Fetching branch via Graphite...${NC}"
+    (cd "$main_dir" && gt get "$branch" --force)
+    # gt get checks out the branch — switch main back
+    (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
     # Branch now exists locally; create worktree on it
     git worktree add "$wt_dir" "$branch"
   else
