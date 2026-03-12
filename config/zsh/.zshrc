@@ -20,13 +20,16 @@ alias vim=nvim
 
 # Wrap wt so that `wt switch` can cd in the current shell
 wt() {
-  if [[ "${1:-}" == "switch" ]]; then
-    local dir
-    dir=$(command wt switch) || return
-    [[ -n "$dir" ]] && cd "$dir"
-  else
-    command wt "$@"
-  fi
+  case "${1:-}" in
+    switch|create)
+      local dir
+      dir=$(command wt "$@") || return
+      [[ -n "$dir" ]] && cd "$dir"
+      ;;
+    *)
+      command wt "$@"
+      ;;
+  esac
 }
 
 # --- Platform-specific ---
