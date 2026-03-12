@@ -413,9 +413,16 @@ cmd_create() {
   echo ""
   pg_clone_worktree_dbs "$wt_id"
 
-  # Update .env with worktree-specific vars
+  # Copy main .env then apply worktree-specific vars
+  local main_env
+  main_env=$(env_file_for "$(main_worktree_dir)")
   local wt_env
   wt_env=$(env_file_for "$wt_dir")
+  if [[ -f "$main_env" ]]; then
+    mkdir -p "$(dirname "$wt_env")"
+    cp "$main_env" "$wt_env"
+    echo -e "${GREEN}Copied .env from main${NC}"
+  fi
   write_env_vars "$wt_env" "$wt_id" "$port"
   echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL in .env${NC}"
 
