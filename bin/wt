@@ -10,7 +10,9 @@
 #   wt create --detach            Create worktree in detached HEAD state
 #   wt checkout                   Pick a remote branch (yours) to check out as a worktree
 #   wt remove [N|wtN]             Remove worktree + drop DBs (fzf picker if no arg)
+#   wt remove --merged            Remove all worktrees with merged PRs
 #   wt list                       List all worktrees with status
+#   wt merged                     Show worktrees whose branch PR has been merged
 #   wt switch                     Interactive worktree switcher (requires fzf)
 #   wt env-sync                   Copy main .env to all worktrees
 #   wt db-backup [label]          Backup current worktree's databases
@@ -183,9 +185,11 @@ Commands:
   create --gt-get <branch>   Fetch branch via Graphite, then create worktree
   checkout                   Pick a remote branch (yours) to check out as a worktree
   remove [N|wtN]             Remove worktree and drop DBs (interactive picker if no arg)
+  remove --merged            Remove all worktrees with merged PRs
   list                       List all worktrees with ID, branch, port, and status
   switch                     Interactive worktree switcher (requires fzf)
   env-sync                   Copy main .env to all worktrees, preserving wt-specific vars
+  merged                     Show worktrees whose branch PR has been merged
   db-backup [label]          Backup current worktree's databases (optional label)
   db-restore [timestamp]     Restore databases from a backup (fzf picker if no arg)
   help                       Show detailed documentation
@@ -243,10 +247,15 @@ COMMANDS
     Remove a worktree and drop its databases. Accepts a number (3) or
     identifier (wt3). With no argument, opens an fzf picker.
 
+    Use --merged to find and remove all worktrees whose PR has been merged
+    on GitHub (works with squash merges). Worktrees with uncommitted changes
+    are skipped. Prompts for confirmation before removing.
+
     Examples:
-      wt remove 2     # remove wt2
-      wt remove wt2   # same thing
-      wt remove        # interactive picker
+      wt remove 2        # remove wt2
+      wt remove wt2      # same thing
+      wt remove           # interactive picker
+      wt remove --merged  # remove all worktrees with merged PRs
 
   wt list
 
@@ -257,6 +266,12 @@ COMMANDS
 
     Interactive fzf picker to select a worktree and print its path. Useful
     with cd: cd $(wt switch)
+
+  wt merged
+
+    Show worktrees whose branch has a merged PR on GitHub. Useful for
+    finding worktrees that can be cleaned up with wt remove. Uses the
+    gh CLI to check PR status, which works correctly with squash merges.
 
   wt env-sync
 
@@ -533,9 +548,95 @@ cmd_checkout() {
   cmd_create --branch "$branch"
 }
 
+remove_one() {
+  local n="$1"
+  local wt_id="wt${n}"
+  local wt_dir
+  wt_dir=$(worktree_dir_for_number "$n")
+
+  echo -e "${BOLD}Removing worktree ${wt_id}${NC}"
+  echo ""
+
+  # Remove git worktree
+  if git worktree list --porcelain | grep -q "^worktree ${wt_dir}$"; then
+    echo -e "${YELLOW}Removing worktree:${NC} $wt_dir"
+    git worktree remove "$wt_dir" --force
+  else
+    echo "Worktree directory not found in git, skipping git worktree remove."
+    if [[ -d "$wt_dir" ]]; then
+      rm -rf "$wt_dir"
+    fi
+  fi
+
+  # Drop databases and user
+  echo ""
+  pg_drop_worktree_dbs "$wt_id"
+
+  echo ""
+  echo -e "${BOLD}Done.${NC}"
+}
+
 cmd_remove() {
   local arg="${1:-}"
   local n=""
+
+  if [[ "$arg" == "--merged" ]]; then
+    if ! command -v gh &>/dev/null; then
+      echo -e "${RED}gh CLI is required. Install it first.${NC}"
+      exit 1
+    fi
+
+    local lines
+    if ! lines=$(merged_worktrees); then
+      echo -e "${YELLOW}No worktrees with merged PRs found.${NC}"
+      exit 0
+    fi
+
+    # Split into clean and dirty worktrees
+    local -a clean_nums=() clean_branches=() skipped=()
+    while IFS=$'\t' read -r num branch; do
+      local wt_dir
+      wt_dir=$(worktree_dir_for_number "$num")
+      if [[ -n "$(git -C "$wt_dir" status --porcelain 2>/dev/null)" ]]; then
+        skipped+=("wt${num}\t${branch}")
+      else
+        clean_nums+=("$num")
+        clean_branches+=("$branch")
+      fi
+    done <<< "$lines"
+
+    if [[ ${#skipped[@]} -gt 0 ]]; then
+      echo -e "${YELLOW}Skipping worktrees with uncommitted changes:${NC}"
+      for s in "${skipped[@]}"; do
+        echo -e "  ${s}"
+      done
+      echo ""
+    fi
+
+    if [[ ${#clean_nums[@]} -eq 0 ]]; then
+      echo -e "${YELLOW}No clean worktrees with merged PRs to remove.${NC}"
+      exit 0
+    fi
+
+    echo -e "${BOLD}Worktrees to remove:${NC}"
+    for i in "${!clean_nums[@]}"; do
+      echo -e "  ${GREEN}wt${clean_nums[$i]}${NC}\t${clean_branches[$i]}"
+    done
+    echo ""
+
+    read -rp "Remove all of these? [y/N] " confirm
+    if [[ "$confirm" != [yY] ]]; then
+      echo "Aborted."
+      exit 0
+    fi
+
+    echo ""
+    for n in "${clean_nums[@]}"; do
+      remove_one "$n"
+      echo ""
+    done
+    return
+  fi
 
   if [[ -z "$arg" ]]; then
     # Interactive picker
@@ -591,30 +692,7 @@ cmd_remove() {
     fi
   fi
 
-  local wt_id="wt${n}"
-  local wt_dir
-  wt_dir=$(worktree_dir_for_number "$n")
-
-  echo -e "${BOLD}Removing worktree ${wt_id}${NC}"
-  echo ""
-
-  # Remove git worktree
-  if git worktree list --porcelain | grep -q "^worktree ${wt_dir}$"; then
-    echo -e "${YELLOW}Removing worktree:${NC} $wt_dir"
-    git worktree remove "$wt_dir" --force
-  else
-    echo "Worktree directory not found in git, skipping git worktree remove."
-    if [[ -d "$wt_dir" ]]; then
-      rm -rf "$wt_dir"
-    fi
-  fi
-
-  # Drop databases and user
-  echo ""
-  pg_drop_worktree_dbs "$wt_id"
-
-  echo ""
-  echo -e "${BOLD}Done.${NC}"
+  remove_one "$n"
 }
 
 cmd_list() {
@@ -796,6 +874,79 @@ cmd_env_sync() {
   fi
 }
 
+# Print "number\tbranch" lines for each worktree whose PR has been merged.
+# Requires gh CLI. Returns 1 if none found.
+merged_worktrees() {
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  local repo
+  repo=$(repo_name)
+
+  local -a wt_paths=() wt_branches=()
+  local cur_wt="" cur_branch=""
+
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) cur_wt="${line#worktree }" ;;
+      branch\ *)   cur_branch="${line#branch refs/heads/}" ;;
+      detached)    cur_branch="" ;;
+      "")
+        if [[ -n "$cur_wt" ]]; then
+          wt_paths+=("$cur_wt")
+          wt_branches+=("$cur_branch")
+        fi
+        cur_wt="" cur_branch=""
+        ;;
+    esac
+  done < <(git worktree list --porcelain; echo "")
+
+  local found=0
+  for i in "${!wt_paths[@]}"; do
+    local wt="${wt_paths[$i]}"
+    local branch="${wt_branches[$i]}"
+
+    [[ "$wt" == "$main_dir" ]] && continue
+    [[ -z "$branch" ]] && continue
+
+    local dir_name
+    dir_name=$(basename "$wt")
+    if [[ "$dir_name" =~ ^${repo}-wt([0-9]+)$ ]]; then
+      local num="${BASH_REMATCH[1]}"
+      local pr_state
+      pr_state=$(gh pr view "$branch" --json state --jq '.state' 2>/dev/null) || continue
+      if [[ "$pr_state" == "MERGED" ]]; then
+        echo -e "${num}\t${branch}"
+        ((++found))
+      fi
+    fi
+  done
+
+  (( found )) || return 1
+}
+
+cmd_merged() {
+  if ! command -v gh &>/dev/null; then
+    echo -e "${RED}gh CLI is required. Install it first.${NC}"
+    exit 1
+  fi
+
+  local lines
+  if ! lines=$(merged_worktrees); then
+    echo -e "${YELLOW}No worktrees with merged PRs found.${NC}"
+    return
+  fi
+
+  while IFS=$'\t' read -r num branch; do
+    local wt_dir
+    wt_dir=$(worktree_dir_for_number "$num")
+    if [[ -n "$(git -C "$wt_dir" status --porcelain 2>/dev/null)" ]]; then
+      echo -e "${GREEN}wt${num}${NC}\t${branch}\t${YELLOW}(dirty)${NC}"
+    else
+      echo -e "${GREEN}wt${num}${NC}\t${branch}"
+    fi
+  done <<< "$lines"
+}
+
 cmd_db_restore() {
   local timestamp="${1:-}"
   local wt_id
@@ -860,6 +1011,7 @@ case "$command" in
   env-sync)   cmd_env_sync ;;
   db-backup)  cmd_db_backup "$@" ;;
   db-restore) cmd_db_restore "$@" ;;
+  merged)     cmd_merged ;;
   help)       cmd_help ;;
   *)          echo "Unknown command: $command"; usage ;;
 esac
