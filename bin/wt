@@ -12,6 +12,7 @@
 #   wt remove [N|wtN]             Remove worktree + drop DBs (fzf picker if no arg)
 #   wt remove --merged            Remove all worktrees with merged PRs
 #   wt list                       List all worktrees with status
+#   wt main                       Switch to the main worktree
 #   wt merged                     Show worktrees whose branch PR has been merged
 #   wt switch                     Interactive worktree switcher (requires fzf)
 #   wt env-sync                   Copy main .env to all worktrees
@@ -187,6 +188,7 @@ Commands:
   remove [N|wtN]             Remove worktree and drop DBs (interactive picker if no arg)
   remove --merged            Remove all worktrees with merged PRs
   list                       List all worktrees with ID, branch, port, and status
+  main                       Switch to the main worktree
   switch                     Interactive worktree switcher (requires fzf)
   env-sync                   Copy main .env to all worktrees, preserving wt-specific vars
   merged                     Show worktrees whose branch PR has been merged
@@ -261,6 +263,10 @@ COMMANDS
 
     Show all worktrees with their ID, directory, branch, port, dirty status,
     and commit hash.
+
+  wt main
+
+    Switch to the main worktree directory.
 
   wt switch
 
@@ -649,24 +655,79 @@ cmd_remove() {
     main_dir=$(main_worktree_dir)
     local repo
     repo=$(repo_name)
+    local main_head
+    main_head=$(git -C "$main_dir" rev-parse HEAD 2>/dev/null)
 
-    # Build a list of wtN worktrees for the picker
-    git worktree list --porcelain | awk '
-      /^worktree / { wt = $2 }
-      /^branch /   { branch = $2; sub(/^refs\/heads\//, "", branch) }
-      /^$/ {
-        if (wt != "") print wt "|" branch
-        wt = ""; branch = ""
-      }
-    ' | while IFS='|' read -r wt_path branch; do
-      local dir_name
-      dir_name=$(basename "$wt_path")
-      # Only show wtN worktrees, not main
-      if [[ "$dir_name" =~ ^${repo}-wt([0-9]+)$ ]]; then
-        local wt_num="${BASH_REMATCH[1]}"
-        printf "wt%-4s %-40s %s\n" "$wt_num" "$wt_path" "${branch:-(detached)}"
-      fi
-    done > /tmp/wt_remove_list.$$ || true
+    # Build a wt list-style table of wtN worktrees for the picker
+    local -a wt_paths=() wt_commits=() wt_branches=()
+    local cur_wt="" cur_commit="" cur_branch=""
+
+    while IFS= read -r line; do
+      case "$line" in
+        worktree\ *) cur_wt="${line#worktree }" ;;
+        HEAD\ *)     cur_commit="${line#HEAD }" ;;
+        branch\ *)   cur_branch="${line#branch refs/heads/}" ;;
+        detached)    cur_branch="(detached)" ;;
+        "")
+          if [[ -n "$cur_wt" ]]; then
+            wt_paths+=("$cur_wt")
+            wt_commits+=("$cur_commit")
+            wt_branches+=("$cur_branch")
+          fi
+          cur_wt="" cur_commit="" cur_branch=""
+          ;;
+      esac
+    done < <(git worktree list --porcelain; echo "")
+
+    {
+      for i in "${!wt_paths[@]}"; do
+        local wt="${wt_paths[$i]}"
+        local commit="${wt_commits[$i]}"
+        local branch="${wt_branches[$i]}"
+        local dir_name
+        dir_name=$(basename "$wt")
+
+        # Only show wtN worktrees, not main
+        if [[ "$dir_name" =~ ^${repo}-wt([0-9]+)$ ]]; then
+          local wt_num="${BASH_REMATCH[1]}"
+          local id="wt${wt_num}"
+          local port=$((3000 + wt_num))
+
+          # Build status: behind/ahead main + dirty indicators
+          local status=""
+          if [[ "$branch" != "(detached)" && -n "$main_head" ]]; then
+            local behind ahead
+            behind=$(git -C "$wt" rev-list --count "$commit..$main_head" 2>/dev/null) || behind=0
+            ahead=$(git -C "$wt" rev-list --count "$main_head..$commit" 2>/dev/null) || ahead=0
+            (( behind )) && status+="⇣${behind}" || true
+            (( ahead )) && status+="⇡${ahead}" || true
+          fi
+
+          local staged=0 unstaged=0 untracked=0
+          while IFS= read -r sline; do
+            [[ -z "$sline" ]] && continue
+            local xy="${sline:0:2}"
+            if [[ "$xy" == "??" ]]; then
+              (( ++untracked ))
+            else
+              [[ "${xy:0:1}" != " " && "${xy:0:1}" != "?" ]] && (( ++staged )) || true
+              [[ "${xy:1:1}" != " " && "${xy:1:1}" != "?" ]] && (( ++unstaged )) || true
+            fi
+          done < <(git -C "$wt" status --porcelain 2>/dev/null)
+          (( staged ))    && status+="+${staged}" || true
+          (( unstaged ))  && status+="!${unstaged}" || true
+          (( untracked )) && status+="?${untracked}" || true
+
+          # Truncate long branch names
+          local display_branch="$branch"
+          if (( ${#display_branch} > 30 )); then
+            display_branch="${display_branch:0:29}…"
+          fi
+
+          printf "%s\t%s\t%s\t%s\t%s\n" "$id" "$display_branch" "$port" "$status" "${commit:0:7}"
+        fi
+      done
+    } > /tmp/wt_remove_list.$$ || true
 
     if [[ ! -s /tmp/wt_remove_list.$$ ]]; then
       echo -e "${YELLOW}No worktrees to remove.${NC}"
@@ -674,8 +735,14 @@ cmd_remove() {
       exit 0
     fi
 
+    local formatted
+    formatted=$(column -t -s $'\t' < /tmp/wt_remove_list.$$)
+
+    local header
+    header=$(printf "%s\t%s\t%s\t%s\t%s" "ID" "BRANCH" "PORT" "STATUS" "COMMIT" | column -t -s $'\t')
+
     local selection
-    selection=$(cat /tmp/wt_remove_list.$$ | fzf --prompt="Remove worktree: " --header="ID     DIRECTORY                                 BRANCH") || {
+    selection=$(echo "$formatted" | fzf --prompt="Remove worktree: " --header="$header") || {
       rm -f /tmp/wt_remove_list.$$
       exit 0
     }
@@ -802,6 +869,10 @@ cmd_list() {
     echo -e "${BOLD}${header}${NC}"
     cat
   }
+}
+
+cmd_main() {
+  echo "$(main_worktree_dir)"
 }
 
 cmd_switch() {
@@ -1007,6 +1078,7 @@ case "$command" in
   checkout)   cmd_checkout ;;
   remove)     cmd_remove "$@" ;;
   list)       cmd_list ;;
+  main)       cmd_main ;;
   switch)     cmd_switch ;;
   env-sync)   cmd_env_sync ;;
   db-backup)  cmd_db_backup "$@" ;;

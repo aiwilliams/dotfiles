@@ -21,9 +21,9 @@ alias vim=nvim
 # Wrap wt so that `wt switch` can cd in the current shell
 wt() {
   case "${1:-}" in
-    switch)
+    switch|main)
       local dir
-      dir=$(command wt switch) || return
+      dir=$(command wt "$1") || return
       [[ -n "$dir" ]] && cd "$dir"
       ;;
     create)
