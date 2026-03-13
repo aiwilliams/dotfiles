@@ -8,16 +8,30 @@ if ! command -v node &>/dev/null; then
   return 1
 fi
 
-echo "Installing dev tools..."
+echo "Setting up Claude Code..."
 
 # Claude Code (native install)
-curl -fsSL https://claude.ai/install.sh | bash
+if ! command -v claude &>/dev/null; then
+  curl -fsSL https://claude.ai/install.sh | bash
+else
+  echo "Claude Code already installed, skipping."
+fi
 
 # Codex
-npm install -g @openai/codex@latest
+if ! command -v codex &>/dev/null; then
+  echo "Installing Codex..."
+  npm install -g @openai/codex@latest
+else
+  echo "Codex already installed, skipping."
+fi
 
 # Graphite (stacked PRs)
-npm install -g @withgraphite/graphite-cli@stable
+if ! command -v gt &>/dev/null; then
+  echo "Installing Graphite..."
+  npm install -g @withgraphite/graphite-cli@stable
+else
+  echo "Graphite already installed, skipping."
+fi
 
 echo "Installed:"
 echo "  claude $(claude --version 2>&1 | head -1)"

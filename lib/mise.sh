@@ -21,6 +21,6 @@ if ! grep -qF "mise activate" "$HOME/.bashrc"; then
   echo "Added mise activation to ~/.bashrc"
 fi
 
-# Install global tools
-mise use -g node@latest
-mise use -g pnpm@latest
+# Install global tools (skip if already installed)
+mise ls -g node &>/dev/null || mise use -g node@latest
+mise ls -g pnpm &>/dev/null || mise use -g pnpm@latest
