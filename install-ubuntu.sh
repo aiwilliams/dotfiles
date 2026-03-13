@@ -28,6 +28,36 @@ if ! locale -a 2>/dev/null | grep -qi 'en_US\.utf'; then
 fi
 sudo update-locale LANG=en_US.UTF-8
 
+# --- OOM protection (keep SSH/Tailscale alive under memory pressure) ---
+
+# Protect tailscaled from OOM killer
+TAILSCALED_OVERRIDE="/etc/systemd/system/tailscaled.service.d/oom-protect.conf"
+if [ ! -f "$TAILSCALED_OVERRIDE" ]; then
+  echo "Protecting tailscaled from OOM killer..."
+  sudo mkdir -p /etc/systemd/system/tailscaled.service.d
+  cat <<'UNIT' | sudo tee "$TAILSCALED_OVERRIDE" > /dev/null
+[Service]
+OOMScoreAdjust=-900
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl restart tailscaled
+fi
+
+# Install earlyoom to kill memory hogs before the system becomes unresponsive
+if ! command -v earlyoom &>/dev/null; then
+  echo "Installing earlyoom..."
+  sudo apt-get install -y earlyoom
+fi
+
+EARLYOOM_CONF="/etc/default/earlyoom"
+EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 5 -s 10 --avoid '(^|/)(tailscaled|sshd|systemd|containerd|dockerd)\$' --prefer '(^|/)(next-server|node|chrome|firefox)\$' -n\""
+if ! grep -qF -- '--avoid' "$EARLYOOM_CONF" 2>/dev/null; then
+  echo "Configuring earlyoom..."
+  echo "$EARLYOOM_DESIRED" | sudo tee "$EARLYOOM_CONF" > /dev/null
+  sudo systemctl enable earlyoom
+  sudo systemctl restart earlyoom
+fi
+
 # --- Kernel tuning ---
 
 SYSCTL_INOTIFY="/etc/sysctl.d/60-inotify.conf"
