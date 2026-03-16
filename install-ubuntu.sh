@@ -160,6 +160,18 @@ fi
 source "$SCRIPT_DIR/lib/postgres.sh"
 pg_create_worktree_dbs "main"
 
+# --- ngrok ---
+
+if ! command -v ngrok &>/dev/null; then
+  echo "Installing ngrok..."
+  curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+    | sudo tee /etc/apt/keyrings/ngrok.asc > /dev/null
+  echo "deb [signed-by=/etc/apt/keyrings/ngrok.asc] https://ngrok-agent.s3.amazonaws.com buster main" \
+    | sudo tee /etc/apt/sources.list.d/ngrok.list > /dev/null
+  sudo apt-get update -y
+  sudo apt-get install -y ngrok
+fi
+
 # --- gitleaks ---
 
 if ! command -v gitleaks &>/dev/null; then
