@@ -337,6 +337,7 @@ cmd_create() {
   local branch=""
   local detach=false
   local gt_get=false
+  local gh_checkout=false
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
@@ -347,6 +348,10 @@ cmd_create() {
         ;;
       --gt-get)
         gt_get=true
+        shift
+        ;;
+      --gh-checkout)
+        gh_checkout=true
         shift
         ;;
       -*)
@@ -367,9 +372,10 @@ cmd_create() {
   if [[ -z "$branch" ]] && [[ "$detach" == false ]]; then
     echo -e "${RED}Error: branch name required${NC}"
     echo ""
-    echo "Usage: wt create <branch>           Create worktree on a branch"
-    echo "       wt create --gt-get <branch>  Fetch branch via Graphite first"
-    echo "       wt create --detach           Create worktree in detached HEAD state"
+    echo "Usage: wt create <branch>                Create worktree on a branch"
+    echo "       wt create --gt-get <branch>       Fetch branch via Graphite first"
+    echo "       wt create --gh-checkout <branch>   Checkout PR branch via GitHub CLI"
+    echo "       wt create --detach                Create worktree in detached HEAD state"
     exit 1
   fi
 
@@ -383,8 +389,23 @@ cmd_create() {
     exit 1
   fi
 
+  if [[ "$gh_checkout" == true ]] && [[ -z "$branch" ]]; then
+    echo -e "${RED}Error: --gh-checkout requires a branch name${NC}"
+    exit 1
+  fi
+
   if [[ "$gt_get" == true ]] && [[ "$detach" == true ]]; then
     echo -e "${RED}Error: cannot use --gt-get with --detach${NC}"
+    exit 1
+  fi
+
+  if [[ "$gh_checkout" == true ]] && [[ "$detach" == true ]]; then
+    echo -e "${RED}Error: cannot use --gh-checkout with --detach${NC}"
+    exit 1
+  fi
+
+  if [[ "$gh_checkout" == true ]] && [[ "$gt_get" == true ]]; then
+    echo -e "${RED}Error: cannot use --gh-checkout with --gt-get${NC}"
     exit 1
   fi
 
@@ -423,6 +444,24 @@ cmd_create() {
     (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
     # Branch now exists locally; create worktree on it
     git worktree add "$wt_dir" "$branch"
+  elif [[ "$gh_checkout" == true ]]; then
+    # Checkout PR branch via GitHub CLI in the main worktree
+    if ! command -v gh &>/dev/null; then
+      echo -e "${RED}Error: gh (GitHub CLI) is required for --gh-checkout${NC}"
+      exit 1
+    fi
+    local main_dir
+    main_dir=$(main_worktree_dir)
+    local original_branch
+    original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
+    echo -e "${BOLD}Checking out branch via GitHub CLI...${NC}"
+    (cd "$main_dir" && gh pr checkout "$branch" --force)
+    # gh pr checkout checks out the branch — switch main back
+    local checked_out_branch
+    checked_out_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
+    (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
+    # Branch now exists locally; create worktree on it
+    git worktree add "$wt_dir" "$checked_out_branch"
   else
     git fetch origin "$branch" 2>/dev/null || true
     git worktree add "$wt_dir" "$branch" 2>/dev/null \
@@ -448,7 +487,7 @@ cmd_create() {
   echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL in .env${NC}"
 
   # Track branch in Graphite (skip if --gt-get already set up tracking)
-  if [[ -n "$branch" ]] && [[ "$gt_get" == false ]] && command -v gt &>/dev/null; then
+  if [[ -n "$branch" ]] && [[ "$gt_get" == false ]] && [[ "$gh_checkout" == false ]] && command -v gt &>/dev/null; then
     echo ""
     echo -e "${BOLD}Tracking branch in Graphite...${NC}"
     local pr_base=""
