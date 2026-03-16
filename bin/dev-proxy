@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# dev-proxy — Route a local domain to a dev server via Caddy reverse proxy.
+#
+# Reads the domain from PROXY_DOMAIN in the current project's .env file,
+# or accepts it via the --domain flag. Listens on port 5000 by default.
+#
+# Usage:
+#   dev-proxy main              → localhost:3000 via https://domain:5000
+#   dev-proxy wt1               → localhost:3001 via https://domain:5000
+#   dev-proxy wt2               → localhost:3002 via https://domain:5000
+#   dev-proxy fw wt1            → fw:3001        via https://domain:5000
+#   dev-proxy --domain x.test main  → override domain
+#   dev-proxy stop              → stop Caddy
+#   dev-proxy status            → show current routing
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
+
+# shellcheck source=../lib/caddy.sh
+source "$LIB_DIR/caddy.sh"
+
+# --------------------------------------------------------------------------
+# Colors
+# --------------------------------------------------------------------------
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# --------------------------------------------------------------------------
+# Domain resolution
+# --------------------------------------------------------------------------
+
+# Try to read PROXY_DOMAIN from the nearest .env file.
+resolve_domain() {
+  # Walk up from cwd looking for apps/platform/.env (monorepo convention)
+  local dir="$PWD"
+  while [[ "$dir" != "/" ]]; do
+    local env_file="$dir/apps/platform/.env"
+    if [[ -f "$env_file" ]]; then
+      local domain
+      domain=$(grep -E '^PROXY_DOMAIN=' "$env_file" | tail -1 | cut -d= -f2 | tr -d '"'"'" || true)
+      if [[ -n "$domain" ]]; then
+        echo "$domain"
+        return
+      fi
+    fi
+    dir=$(dirname "$dir")
+  done
+  return 1
+}
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+# Port Caddy listens on. Must match proxy_port in wt's write_env_vars.
+LISTEN_PORT=5000
+
+usage() {
+  cat <<EOF
+Route a local domain to a Next.js dev server via Caddy reverse proxy.
+Requires mkcert certs and PROXY_DOMAIN in .env.
+
+Usage: dev-proxy [--domain <domain>] <target> [worktree]
+
+Targets:
+  main              Route to localhost:3000
+  wt<N>             Route to localhost:300N  (e.g. wt1 → 3001)
+  <host> <target>   Route to host:port       (e.g. fw wt1 → fw:3001)
+  stop              Stop the proxy
+  status            Show current routing
+  help              Show this help
+
+Caddy listens on port ${LISTEN_PORT}. The domain is read from PROXY_DOMAIN
+in apps/platform/.env, or override with --domain.
+EOF
+}
+
+# Convert a target name (main, wt1, wt2, ...) to a port number.
+target_to_port() {
+  local target="$1"
+  case "$target" in
+    main)
+      echo 3000
+      ;;
+    wt[0-9]*)
+      local n="${target#wt}"
+      if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Invalid worktree: ${target}${NC}" >&2
+        exit 1
+      fi
+      echo $((3000 + n))
+      ;;
+    *)
+      echo -e "${RED}Unknown target: ${target}${NC}" >&2
+      echo "Use: main, wt1, wt2, ..." >&2
+      exit 1
+      ;;
+  esac
+}
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+cmd_route() {
+  local domain="$1"
+  local upstream_host="$2"
+  local target="$3"
+  local port
+  port=$(target_to_port "$target")
+
+  caddy_write_config "$domain" "$LISTEN_PORT" "$upstream_host" "$port"
+  caddy_start "$domain"
+
+  echo -e "${GREEN}https://${domain}:${LISTEN_PORT}${NC} → ${BOLD}${upstream_host}:${port}${NC}"
+}
+
+cmd_stop() {
+  caddy_stop
+  echo "Proxy stopped."
+}
+
+cmd_status() {
+  echo -n "Proxy: "
+  caddy_status
+}
+
+# --------------------------------------------------------------------------
+# Main dispatch
+# --------------------------------------------------------------------------
+
+[[ $# -lt 1 ]] && { usage; exit 1; }
+
+# Parse --domain flag
+DOMAIN=""
+if [[ "$1" == "--domain" ]]; then
+  [[ $# -lt 2 ]] && { echo -e "${RED}--domain requires a value${NC}" >&2; exit 1; }
+  DOMAIN="$2"
+  shift 2
+fi
+
+[[ $# -lt 1 ]] && { usage; exit 1; }
+
+# Resolve domain if not explicitly provided
+require_domain() {
+  if [[ -z "$DOMAIN" ]]; then
+    DOMAIN=$(resolve_domain) || {
+      echo -e "${RED}No domain found.${NC}" >&2
+      echo "Set PROXY_DOMAIN in apps/platform/.env, or use --domain <domain>" >&2
+      exit 1
+    }
+  fi
+}
+
+case "$1" in
+  stop)
+    cmd_stop
+    ;;
+  status)
+    cmd_status
+    ;;
+  help|--help|-h)
+    usage
+    ;;
+  main|wt[0-9]*)
+    require_domain
+    cmd_route "$DOMAIN" "localhost" "$1"
+    ;;
+  *)
+    # dev-proxy <host> <target>  (e.g. dev-proxy fw wt1)
+    if [[ $# -lt 2 ]]; then
+      echo -e "${RED}Unknown command: $1${NC}" >&2
+      usage
+      exit 1
+    fi
+    require_domain
+    cmd_route "$DOMAIN" "$1" "$2"
+    ;;
+esac

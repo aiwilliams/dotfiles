@@ -160,6 +160,32 @@ fi
 source "$SCRIPT_DIR/lib/postgres.sh"
 pg_create_worktree_dbs "main"
 
+# --- mkcert ---
+
+if ! command -v mkcert &>/dev/null; then
+  echo "Installing mkcert..."
+  sudo apt-get install -y libnss3-tools
+  curl -fsSL "https://dl.filippo.io/mkcert/latest?for=linux/amd64" -o /tmp/mkcert
+  sudo install -m 755 /tmp/mkcert /usr/local/bin/mkcert
+  rm -f /tmp/mkcert
+fi
+
+# --- Caddy ---
+
+if ! command -v caddy &>/dev/null; then
+  echo "Installing Caddy..."
+  sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+    | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+    | sudo tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
+  sudo apt-get update -y
+  sudo apt-get install -y caddy
+  # Stop the default systemd service — we manage Caddy ourselves via opine-proxy
+  sudo systemctl stop caddy 2>/dev/null || true
+  sudo systemctl disable caddy 2>/dev/null || true
+fi
+
 # --- ngrok ---
 
 if ! command -v ngrok &>/dev/null; then

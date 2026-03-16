@@ -133,12 +133,32 @@ compute_port() {
 
 # Update POSTGRES_*, PORT, NEXT_PUBLIC_HOST, and NEXT_PUBLIC_SITE_URL in a .env file.
 # Delegates POSTGRES_* handling to pg_apply_env, then layers on PORT, host, and site URL.
+#
+# If PROXY_DOMAIN is set in the env file (e.g. opine.test), NEXT_PUBLIC_SITE_URL
+# and NEXT_PUBLIC_HOST use the proxy domain instead of hostname:port. PORT is still
+# set per-worktree (needed for Inngest port mapping and the dev server).
 write_env_vars() {
   local env_file="$1"
   local wt_identifier="$2"
   local port="$3"
   local host
   host=$(hostname)
+
+  # Detect PROXY_DOMAIN from the env file (before we strip managed vars)
+  local proxy_domain=""
+  if [[ -f "$env_file" ]]; then
+    proxy_domain=$(grep -E '^PROXY_DOMAIN=' "$env_file" | tail -1 | cut -d= -f2 | tr -d '"'"'" || true)
+  fi
+
+  local proxy_port=5000  # must match LISTEN_PORT in dev-proxy
+  local site_url public_host
+  if [[ -n "$proxy_domain" ]]; then
+    site_url="https://${proxy_domain}:${proxy_port}"
+    public_host="$proxy_domain"
+  else
+    site_url="https://${host}:${port}"
+    public_host="$host"
+  fi
 
   # Strip managed vars if the file exists (pg_apply_env handles POSTGRES_*)
   if [[ -f "$env_file" ]]; then
@@ -148,15 +168,15 @@ write_env_vars() {
     sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
     echo "" >> "$tmp"
     echo "PORT=${port}" >> "$tmp"
-    echo "NEXT_PUBLIC_HOST=${host}" >> "$tmp"
-    echo "NEXT_PUBLIC_SITE_URL=https://${host}:${port}" >> "$tmp"
+    echo "NEXT_PUBLIC_HOST=${public_host}" >> "$tmp"
+    echo "NEXT_PUBLIC_SITE_URL=${site_url}" >> "$tmp"
     mv "$tmp" "$env_file"
   else
     mkdir -p "$(dirname "$env_file")"
     {
       echo "PORT=${port}"
-      echo "NEXT_PUBLIC_HOST=${host}"
-      echo "NEXT_PUBLIC_SITE_URL=https://${host}:${port}"
+      echo "NEXT_PUBLIC_HOST=${public_host}"
+      echo "NEXT_PUBLIC_SITE_URL=${site_url}"
     } > "$env_file"
   fi
 
