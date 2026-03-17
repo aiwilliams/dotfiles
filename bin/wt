@@ -5,19 +5,19 @@
 # databases, and ports. Branches are optional metadata.
 #
 # Usage:
-#   wt create <branch>            Create worktree with auto-numbered ID on a branch
-#   wt create --gt-get <branch>   Fetch branch via Graphite, then create worktree
-#   wt create --detach            Create worktree in detached HEAD state
-#   wt checkout                   Pick a remote branch (yours) to check out as a worktree
-#   wt remove [N|wtN]             Remove worktree + drop DBs (fzf picker if no arg)
-#   wt remove --merged            Remove all worktrees with merged PRs
-#   wt list                       List all worktrees with status
-#   wt main                       Switch to the main worktree
-#   wt merged                     Show worktrees whose branch PR has been merged
-#   wt switch                     Interactive worktree switcher (requires fzf)
-#   wt env-sync                   Copy main .env to all worktrees
-#   wt db-backup [label]          Backup current worktree's databases
-#   wt db-restore [timestamp]     Restore databases from a backup
+#   wt create <branch>                  Create worktree with auto-numbered ID on a branch
+#   wt create --detach                  Create worktree in detached HEAD state
+#   wt checkout                         Pick a remote PR branch (gt get or gh pr checkout)
+#   wt remove [N|wtN]                   Remove worktree + drop DBs (fzf picker if no arg)
+#   wt remove --merged                  Remove all worktrees with merged PRs
+#   wt list                             List all worktrees with status
+#   wt main                             Switch to the main worktree
+#   wt merged                           Show worktrees whose branch PR has been merged
+#   wt switch                           Interactive worktree switcher (requires fzf)
+#   wt env-sync                         Copy main .env to all worktrees
+#   wt proxy [--host H] [N|off]         Route HTTPS proxy to a worktree
+#   wt db-backup [label]                Backup current worktree's databases
+#   wt db-restore [timestamp]           Restore databases from a backup
 
 set -euo pipefail
 
@@ -28,6 +28,8 @@ LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
 source "$LIB_DIR/postgres.sh"
 # shellcheck source=../lib/projects.sh
 source "$LIB_DIR/projects.sh"
+# shellcheck source=../lib/caddy.sh
+source "$LIB_DIR/caddy.sh"
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -150,7 +152,7 @@ clear_proxy_domain() {
 set_proxy_domain() {
   local env_file="$1"
   local domain="$2"
-  local proxy_port=5000  # must match LISTEN_PORT in dev-proxy
+  local proxy_port=5000
 
   if [[ -f "$env_file" ]]; then
     # Remove existing PROXY_DOMAIN line if present
@@ -198,7 +200,7 @@ write_env_vars() {
     proxy_domain=$(grep -E '^PROXY_DOMAIN=' "$env_file" | tail -1 | cut -d= -f2 | tr -d '"'"'" || true)
   fi
 
-  local proxy_port=5000  # must match LISTEN_PORT in dev-proxy
+  local proxy_port=5000
   local site_url public_host
   if [[ -n "$proxy_domain" ]]; then
     site_url="https://${proxy_domain}:${proxy_port}"
@@ -262,20 +264,19 @@ usage() {
 Usage: wt <command> [args]
 
 Commands:
-  create <branch>            Create worktree on a branch (or --detach for detached HEAD)
-  create --gt-get <branch>   Fetch branch via Graphite, then create worktree
-  checkout                   Pick a remote branch (yours) to check out as a worktree
-  remove [N|wtN]             Remove worktree and drop DBs (interactive picker if no arg)
-  remove --merged            Remove all worktrees with merged PRs
-  list                       List all worktrees with ID, branch, port, and status
-  main                       Switch to the main worktree
-  switch                     Interactive worktree switcher (requires fzf)
-  env-sync                   Copy main .env to all worktrees, preserving wt-specific vars
-  proxy [N|wtN|off]          Move PROXY_DOMAIN to a worktree (show current if no arg)
-  merged                     Show worktrees whose branch PR has been merged
-  db-backup [label]          Backup current worktree's databases (optional label)
-  db-restore [timestamp]     Restore databases from a backup (fzf picker if no arg)
-  help                       Show detailed documentation
+  create <branch>                Create worktree on a branch (or --detach for detached HEAD)
+  checkout                       Pick a remote PR branch (gt get or gh pr checkout)
+  remove [N|wtN]                 Remove worktree and drop DBs (interactive picker if no arg)
+  remove --merged                Remove all worktrees with merged PRs
+  list                           List all worktrees with ID, branch, port, and status
+  main                           Switch to the main worktree
+  switch                         Interactive worktree switcher (requires fzf)
+  env-sync                       Copy main .env to all worktrees, preserving wt-specific vars
+  proxy [--host H] [N|wtN|off]   Move PROXY_DOMAIN to a worktree (show current if no arg)
+  merged                         Show worktrees whose branch PR has been merged
+  db-backup [label]              Backup current worktree's databases (optional label)
+  db-restore [timestamp]         Restore databases from a backup (fzf picker if no arg)
+  help                           Show detailed documentation
 EOF
   exit 1
 }
@@ -304,26 +305,23 @@ THE wtN NUMBERING SYSTEM
 COMMANDS
 
   wt create <branch>
-  wt create --gt-get <branch>
   wt create --detach
 
     Create a new worktree with the next available wtN identifier. A branch
     name is required — the worktree checks out or creates that branch, copies
     .env from main, clones databases, and runs scripts/setup.sh if present.
-    Use --gt-get to fetch the branch (and its stack) via Graphite before
-    creating the worktree — useful for branches tracked by Graphite or on
-    a remote you haven't fetched yet. Use --detach for a detached HEAD worktree.
+    Use --detach for a detached HEAD worktree.
 
     Examples:
-      wt create my-feature                              # worktree on branch my-feature
-      wt create --gt-get improve/preflight-port-check   # fetch via Graphite first
-      wt create --detach                                # detached worktree at next wtN
+      wt create my-feature   # worktree on branch my-feature
+      wt create --detach     # detached worktree at next wtN
 
   wt checkout
 
     Interactive picker (requires gh + fzf) that lists your remote branches
-    with open PRs that aren't already checked out as worktrees. Selecting a
-    branch runs wt create --branch <name> for you.
+    with PRs that aren't already checked out as worktrees. Fetches the
+    selected branch via Graphite (gt get) if available, otherwise via
+    GitHub CLI (gh pr checkout), then creates a worktree for it.
 
   wt remove [N|wtN]
 
@@ -368,17 +366,21 @@ COMMANDS
     from main). Run this after editing the primary .env to propagate changes
     to all worktrees.
 
-  wt proxy [N|wtN|off]
+  wt proxy [--host <host>] [N|wtN|off]
 
-    Move PROXY_DOMAIN to a specific worktree. Only one worktree at a time
-    has PROXY_DOMAIN set. The domain value is taken from whichever worktree
-    currently has it.
+    Move PROXY_DOMAIN to a specific worktree and start/reload the Caddy
+    reverse proxy. Only one worktree at a time has PROXY_DOMAIN set. The
+    domain value is taken from whichever worktree currently has it.
+
+    Use --host to route via a remote machine (e.g. from Mac to a dev VM).
 
     Examples:
-      wt proxy wt1      # set PROXY_DOMAIN on wt1, clear from others
-      wt proxy main     # set PROXY_DOMAIN on main, clear from others
-      wt proxy off      # clear PROXY_DOMAIN from all worktrees
-      wt proxy          # show which worktree has PROXY_DOMAIN
+      wt proxy 6             # route to wt6 on localhost
+      wt proxy wt1           # route to wt1 on localhost
+      wt proxy main          # route to main on localhost
+      wt proxy --host fw 1   # route to wt1 on host "fw"
+      wt proxy off           # clear PROXY_DOMAIN and stop proxy
+      wt proxy               # show which worktree has PROXY_DOMAIN
 
   wt help
 
@@ -427,25 +429,51 @@ DATABASE BACKUP & RESTORE
 EOF
 }
 
+# Fetch a remote branch into the main worktree, trying Graphite first then GitHub CLI.
+# Leaves main on its original branch afterward. Sets FETCH_BRANCH to the local branch
+# name that was checked out (gh pr checkout may rename).
+# $1 = branch name
+fetch_remote_branch() {
+  local branch="$1"
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  local original_branch
+  original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
+
+  FETCH_BRANCH="$branch"
+
+  # Try Graphite first — gt get fetches the branch and its stack
+  if command -v gt &>/dev/null; then
+    echo -e "${BOLD}Fetching branch via Graphite...${NC}"
+    if (cd "$main_dir" && gt get "$branch" --force 2>/dev/null); then
+      (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
+      return 0
+    fi
+    echo -e "${YELLOW}Not a Graphite branch, trying GitHub CLI...${NC}"
+  fi
+
+  # Fall back to gh pr checkout
+  if command -v gh &>/dev/null; then
+    echo -e "${BOLD}Fetching branch via GitHub CLI...${NC}"
+    if (cd "$main_dir" && gh pr checkout "$branch" --force 2>/dev/null); then
+      FETCH_BRANCH=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
+      (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 cmd_create() {
   local branch=""
   local detach=false
-  local gt_get=false
-  local gh_checkout=false
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --detach)
         detach=true
-        shift
-        ;;
-      --gt-get)
-        gt_get=true
-        shift
-        ;;
-      --gh-checkout)
-        gh_checkout=true
         shift
         ;;
       -*)
@@ -466,40 +494,13 @@ cmd_create() {
   if [[ -z "$branch" ]] && [[ "$detach" == false ]]; then
     echo -e "${RED}Error: branch name required${NC}"
     echo ""
-    echo "Usage: wt create <branch>                Create worktree on a branch"
-    echo "       wt create --gt-get <branch>       Fetch branch via Graphite first"
-    echo "       wt create --gh-checkout <branch>   Checkout PR branch via GitHub CLI"
-    echo "       wt create --detach                Create worktree in detached HEAD state"
+    echo "Usage: wt create <branch>    Create worktree on a branch"
+    echo "       wt create --detach    Create worktree in detached HEAD state"
     exit 1
   fi
 
   if [[ -n "$branch" ]] && [[ "$detach" == true ]]; then
     echo -e "${RED}Error: cannot specify both a branch and --detach${NC}"
-    exit 1
-  fi
-
-  if [[ "$gt_get" == true ]] && [[ -z "$branch" ]]; then
-    echo -e "${RED}Error: --gt-get requires a branch name${NC}"
-    exit 1
-  fi
-
-  if [[ "$gh_checkout" == true ]] && [[ -z "$branch" ]]; then
-    echo -e "${RED}Error: --gh-checkout requires a branch name${NC}"
-    exit 1
-  fi
-
-  if [[ "$gt_get" == true ]] && [[ "$detach" == true ]]; then
-    echo -e "${RED}Error: cannot use --gt-get with --detach${NC}"
-    exit 1
-  fi
-
-  if [[ "$gh_checkout" == true ]] && [[ "$detach" == true ]]; then
-    echo -e "${RED}Error: cannot use --gh-checkout with --detach${NC}"
-    exit 1
-  fi
-
-  if [[ "$gh_checkout" == true ]] && [[ "$gt_get" == true ]]; then
-    echo -e "${RED}Error: cannot use --gh-checkout with --gt-get${NC}"
     exit 1
   fi
 
@@ -522,40 +523,6 @@ cmd_create() {
   echo -e "${GREEN}Git worktree:${NC} $wt_dir"
   if [[ "$detach" == true ]]; then
     git worktree add "$wt_dir" --detach
-  elif [[ "$gt_get" == true ]]; then
-    # Fetch branch (and its stack) via Graphite in the main worktree
-    if ! command -v gt &>/dev/null; then
-      echo -e "${RED}Error: gt (Graphite CLI) is required for --gt-get${NC}"
-      exit 1
-    fi
-    local main_dir
-    main_dir=$(main_worktree_dir)
-    local original_branch
-    original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
-    echo -e "${BOLD}Fetching branch via Graphite...${NC}"
-    (cd "$main_dir" && gt get "$branch" --force)
-    # gt get checks out the branch — switch main back
-    (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
-    # Branch now exists locally; create worktree on it
-    git worktree add "$wt_dir" "$branch"
-  elif [[ "$gh_checkout" == true ]]; then
-    # Checkout PR branch via GitHub CLI in the main worktree
-    if ! command -v gh &>/dev/null; then
-      echo -e "${RED}Error: gh (GitHub CLI) is required for --gh-checkout${NC}"
-      exit 1
-    fi
-    local main_dir
-    main_dir=$(main_worktree_dir)
-    local original_branch
-    original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
-    echo -e "${BOLD}Checking out branch via GitHub CLI...${NC}"
-    (cd "$main_dir" && gh pr checkout "$branch" --force)
-    # gh pr checkout checks out the branch — switch main back
-    local checked_out_branch
-    checked_out_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
-    (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
-    # Branch now exists locally; create worktree on it
-    git worktree add "$wt_dir" "$checked_out_branch"
   else
     git fetch origin "$branch" 2>/dev/null || true
     git worktree add "$wt_dir" "$branch" 2>/dev/null \
@@ -580,8 +547,8 @@ cmd_create() {
   write_env_vars "$wt_env" "$wt_id" "$port"
   echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL in .env${NC}"
 
-  # Track branch in Graphite (skip if --gt-get already set up tracking)
-  if [[ -n "$branch" ]] && [[ "$gt_get" == false ]] && [[ "$gh_checkout" == false ]] && command -v gt &>/dev/null; then
+  # Track branch in Graphite
+  if [[ -n "$branch" ]] && command -v gt &>/dev/null; then
     echo ""
     echo -e "${BOLD}Tracking branch in Graphite...${NC}"
     local pr_base=""
@@ -684,7 +651,15 @@ cmd_checkout() {
   fi
 
   echo ""
-  cmd_create --branch "$branch"
+
+  # Fetch branch via Graphite or GitHub CLI, then create worktree
+  FETCH_BRANCH=""
+  if fetch_remote_branch "$branch"; then
+    cmd_create "$FETCH_BRANCH"
+  else
+    echo -e "${RED}Failed to fetch branch: ${branch}${NC}"
+    exit 1
+  fi
 }
 
 remove_one() {
@@ -1014,6 +989,16 @@ cmd_list() {
 }
 
 cmd_proxy() {
+  local upstream_host="localhost"
+  if [[ "${1:-}" == "--host" ]]; then
+    upstream_host="${2:-}"
+    if [[ -z "$upstream_host" ]]; then
+      echo -e "${RED}--host requires a value${NC}" >&2
+      exit 1
+    fi
+    shift 2
+  fi
+
   local target="${1:-}"
   local main_dir
   main_dir=$(main_worktree_dir)
@@ -1072,6 +1057,8 @@ cmd_proxy() {
         echo -e "${YELLOW}${all_ids[$i]}${NC} cleared"
       fi
     done
+    caddy_stop
+    echo "Proxy stopped."
     return
   fi
 
@@ -1116,7 +1103,6 @@ cmd_proxy() {
     env_file=$(env_file_for "${all_dirs[$i]}")
     if [[ "$i" == "$target_idx" ]]; then
       set_proxy_domain "$env_file" "$domain"
-      echo -e "${GREEN}${all_ids[$i]}${NC} → ${domain}"
     else
       local prev
       prev=$(read_proxy_domain "$env_file")
@@ -1125,6 +1111,13 @@ cmd_proxy() {
       fi
     fi
   done
+
+  # Start/reload Caddy to route to the target worktree
+  local listen_port=5000
+  local target_port="${all_ports[$target_idx]}"
+  caddy_write_config "$domain" "$listen_port" "$upstream_host" "$target_port"
+  caddy_start "$domain"
+  echo -e "${GREEN}https://${domain}:${listen_port}${NC} → ${upstream_host}:${target_port}"
 }
 
 cmd_main() {

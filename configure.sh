@@ -90,8 +90,7 @@ ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
 ln -sf "$SCRIPT_DIR/bin/wt" "$HOME/.local/bin/wt"
 ln -sf "$SCRIPT_DIR/bin/pg" "$HOME/.local/bin/pg"
 ln -sf "$SCRIPT_DIR/bin/cmux-ws" "$HOME/.local/bin/cmux-ws"
-ln -sf "$SCRIPT_DIR/bin/dev-proxy" "$HOME/.local/bin/dev-proxy"
-echo "Symlinked db-worktree, wt, pg, cmux-ws, and dev-proxy to ~/.local/bin/"
+echo "Symlinked db-worktree, wt, pg, cmux-ws to ~/.local/bin/"
 
 # tmux config
 mkdir -p "$HOME/.config/tmux"

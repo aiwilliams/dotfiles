@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# caddy.sh — Shared Caddy reverse-proxy library for dev-proxy.
-# Sourced (not executed) by bin/dev-proxy.
+# caddy.sh — Shared Caddy reverse-proxy library.
+# Sourced by bin/wt and other scripts that manage the local HTTPS proxy.
 
 CADDY_DATA_DIR="${HOME}/.local/share/dev-proxy/caddy"
 CADDY_CERT_DIR="${HOME}/.local/share/dev-proxy/certs"
@@ -102,7 +102,7 @@ caddy_start() {
   fi
 
   if ! [[ -f "$CADDYFILE" ]]; then
-    echo "No Caddyfile found. Run dev-proxy with a target first." >&2
+    echo "No Caddyfile found. Run 'wt proxy <target>' first." >&2
     return 1
   fi
 
