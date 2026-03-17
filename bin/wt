@@ -15,7 +15,7 @@
 #   wt merged                           Show worktrees whose branch PR has been merged
 #   wt switch                           Interactive worktree switcher (requires fzf)
 #   wt env-sync                         Copy main .env to all worktrees
-#   wt proxy [--host H] [N|off]         Route HTTPS proxy to a worktree
+#   wt proxy [options] [N|off]           Route HTTPS proxy to a worktree
 #   wt db-backup [label]                Backup current worktree's databases
 #   wt db-restore [timestamp]           Restore databases from a backup
 
@@ -272,7 +272,7 @@ Commands:
   main                           Switch to the main worktree
   switch                         Interactive worktree switcher (requires fzf)
   env-sync                       Copy main .env to all worktrees, preserving wt-specific vars
-  proxy [--host H] [N|wtN|off]   Move PROXY_DOMAIN to a worktree (show current if no arg)
+  proxy [options] [N|wtN|off]    Route HTTPS proxy to a worktree (show current if no arg)
   merged                         Show worktrees whose branch PR has been merged
   db-backup [label]              Backup current worktree's databases (optional label)
   db-restore [timestamp]         Restore databases from a backup (fzf picker if no arg)
@@ -366,21 +366,24 @@ COMMANDS
     from main). Run this after editing the primary .env to propagate changes
     to all worktrees.
 
-  wt proxy [--host <host>] [N|wtN|off]
+  wt proxy [--host <host>] [--domain <domain>] [N|wtN|off]
 
-    Move PROXY_DOMAIN to a specific worktree and start/reload the Caddy
-    reverse proxy. Only one worktree at a time has PROXY_DOMAIN set. The
-    domain value is taken from whichever worktree currently has it.
+    Route the HTTPS proxy to a worktree's port via Caddy.
 
-    Use --host to route via a remote machine (e.g. from Mac to a dev VM).
+    Local mode (default): moves PROXY_DOMAIN between worktree .env files
+    so only one worktree at a time has it. Domain is read from .env.
+
+    Remote mode (--host): Caddy-only, no .env management. Use this from
+    a Mac to route to a dev VM. Reads domain from .env if available, or
+    use --domain to specify it explicitly.
 
     Examples:
-      wt proxy 6             # route to wt6 on localhost
-      wt proxy wt1           # route to wt1 on localhost
-      wt proxy main          # route to main on localhost
-      wt proxy --host fw 1   # route to wt1 on host "fw"
-      wt proxy off           # clear PROXY_DOMAIN and stop proxy
-      wt proxy               # show which worktree has PROXY_DOMAIN
+      wt proxy 6                          # local: route to wt6
+      wt proxy main                       # local: route to main
+      wt proxy off                        # stop proxy
+      wt proxy                            # show current routing
+      wt proxy --host fw 6                # remote: route to fw:3006
+      wt proxy --host fw --domain d.test 6  # remote: explicit domain
 
   wt help
 
@@ -988,18 +991,99 @@ cmd_list() {
   }
 }
 
+# Compute port from a target name: main=3000, N or wtN=3000+N
+proxy_target_to_port() {
+  local target="$1"
+  case "$target" in
+    main) echo 3000 ;;
+    *)
+      local n="${target#wt}"
+      echo $((3000 + n))
+      ;;
+  esac
+}
+
 cmd_proxy() {
   local upstream_host="localhost"
-  if [[ "${1:-}" == "--host" ]]; then
-    upstream_host="${2:-}"
-    if [[ -z "$upstream_host" ]]; then
-      echo -e "${RED}--host requires a value${NC}" >&2
-      exit 1
-    fi
-    shift 2
-  fi
+  local explicit_domain=""
+
+  # Parse flags
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --host)
+        upstream_host="${2:-}"
+        if [[ -z "$upstream_host" ]]; then
+          echo -e "${RED}--host requires a value${NC}" >&2
+          exit 1
+        fi
+        shift 2
+        ;;
+      --domain)
+        explicit_domain="${2:-}"
+        if [[ -z "$explicit_domain" ]]; then
+          echo -e "${RED}--domain requires a value${NC}" >&2
+          exit 1
+        fi
+        shift 2
+        ;;
+      *)
+        echo -e "${RED}Unknown option: $1${NC}" >&2
+        exit 1
+        ;;
+    esac
+  done
 
   local target="${1:-}"
+  local listen_port=5000
+  local remote_mode=false
+  [[ "$upstream_host" != "localhost" ]] && remote_mode=true
+
+  # ---------- Remote mode: Caddy-only, no worktree/env management ----------
+  if [[ "$remote_mode" == true ]]; then
+    if [[ "$target" == "off" ]] || [[ -z "$target" && -z "$explicit_domain" ]]; then
+      caddy_stop
+      echo "Proxy stopped."
+      return
+    fi
+
+    if [[ -z "$target" ]]; then
+      echo -n "Proxy: "; caddy_status
+      return
+    fi
+
+    # Normalize: accept "6" or "wt6"
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+      target="wt${target}"
+    fi
+    if [[ "$target" != "main" ]] && ! [[ "$target" =~ ^wt[0-9]+$ ]]; then
+      echo -e "${RED}Unknown target: ${target}${NC}"
+      echo "Use: main, wt1, wt2, ... or off"
+      exit 1
+    fi
+
+    local domain="$explicit_domain"
+    if [[ -z "$domain" ]]; then
+      # Try to read from .env if we're in a repo
+      local env_file
+      env_file=$(env_file_for "$(main_worktree_dir 2>/dev/null)" 2>/dev/null) || true
+      if [[ -n "$env_file" ]]; then
+        domain=$(read_proxy_domain "$env_file")
+      fi
+    fi
+    if [[ -z "$domain" ]]; then
+      echo -e "${RED}No domain. Use --domain <domain> or set PROXY_DOMAIN in .env.${NC}"
+      exit 1
+    fi
+
+    local target_port
+    target_port=$(proxy_target_to_port "$target")
+    caddy_write_config "$domain" "$listen_port" "$upstream_host" "$target_port"
+    caddy_start "$domain"
+    echo -e "${GREEN}https://${domain}:${listen_port}${NC} → ${upstream_host}:${target_port}"
+    return
+  fi
+
+  # ---------- Local mode: manage PROXY_DOMAIN in worktree .env files ----------
   local main_dir
   main_dir=$(main_worktree_dir)
   local repo
@@ -1083,13 +1167,15 @@ cmd_proxy() {
   fi
 
   # Find the proxy domain value (from whoever currently has it, or main's .env)
-  local domain=""
-  for i in "${!all_ids[@]}"; do
-    local env_file
-    env_file=$(env_file_for "${all_dirs[$i]}")
-    domain=$(read_proxy_domain "$env_file")
-    [[ -n "$domain" ]] && break
-  done
+  local domain="$explicit_domain"
+  if [[ -z "$domain" ]]; then
+    for i in "${!all_ids[@]}"; do
+      local env_file
+      env_file=$(env_file_for "${all_dirs[$i]}")
+      domain=$(read_proxy_domain "$env_file")
+      [[ -n "$domain" ]] && break
+    done
+  fi
 
   if [[ -z "$domain" ]]; then
     echo -e "${RED}No PROXY_DOMAIN found in any worktree's .env.${NC}"
@@ -1113,7 +1199,6 @@ cmd_proxy() {
   done
 
   # Start/reload Caddy to route to the target worktree
-  local listen_port=5000
   local target_port="${all_ports[$target_idx]}"
   caddy_write_config "$domain" "$listen_port" "$upstream_host" "$target_port"
   caddy_start "$domain"
