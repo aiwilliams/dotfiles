@@ -120,6 +120,54 @@ current_worktree_id() {
   return 1
 }
 
+# Read PROXY_DOMAIN from a worktree's .env file. Returns empty if not set.
+read_proxy_domain() {
+  local env_file="$1"
+  if [[ -f "$env_file" ]]; then
+    grep -E '^PROXY_DOMAIN=' "$env_file" | tail -1 | cut -d= -f2 | tr -d '"'"'" || true
+  fi
+}
+
+# Remove PROXY_DOMAIN from a .env file and reset NEXT_PUBLIC_SITE_URL.
+clear_proxy_domain() {
+  local env_file="$1"
+  local port="$2"
+  local host
+  host=$(hostname)
+
+  if [[ -f "$env_file" ]]; then
+    local tmp
+    tmp=$(mktemp)
+    grep -v '^PROXY_DOMAIN=' "$env_file" > "$tmp" || true
+    # Reset NEXT_PUBLIC_SITE_URL and NEXT_PUBLIC_HOST to hostname:port
+    sedi "s|^NEXT_PUBLIC_SITE_URL=.*|NEXT_PUBLIC_SITE_URL=https://${host}:${port}|" "$tmp"
+    sedi "s|^NEXT_PUBLIC_HOST=.*|NEXT_PUBLIC_HOST=${host}|" "$tmp"
+    mv "$tmp" "$env_file"
+  fi
+}
+
+# Set PROXY_DOMAIN in a .env file and update NEXT_PUBLIC_SITE_URL.
+set_proxy_domain() {
+  local env_file="$1"
+  local domain="$2"
+  local proxy_port=5000  # must match LISTEN_PORT in dev-proxy
+
+  if [[ -f "$env_file" ]]; then
+    # Remove existing PROXY_DOMAIN line if present
+    local tmp
+    tmp=$(mktemp)
+    grep -v '^PROXY_DOMAIN=' "$env_file" > "$tmp" || true
+    # Add it back
+    sedi -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
+    echo "" >> "$tmp"
+    echo "PROXY_DOMAIN=${domain}" >> "$tmp"
+    mv "$tmp" "$env_file"
+    # Update NEXT_PUBLIC_SITE_URL and NEXT_PUBLIC_HOST
+    sedi "s|^NEXT_PUBLIC_SITE_URL=.*|NEXT_PUBLIC_SITE_URL=https://${domain}:${proxy_port}|" "$env_file"
+    sedi "s|^NEXT_PUBLIC_HOST=.*|NEXT_PUBLIC_HOST=${domain}|" "$env_file"
+  fi
+}
+
 # Compute port from worktree number: 3000 + N
 compute_port() {
   local n="$1"
@@ -165,7 +213,7 @@ write_env_vars() {
     local tmp
     tmp=$(mktemp)
     grep -v '^PORT=\|^NEXT_PUBLIC_HOST=\|^NEXT_PUBLIC_SITE_URL=' "$env_file" > "$tmp" || true
-    sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
+    sedi -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
     echo "" >> "$tmp"
     echo "PORT=${port}" >> "$tmp"
     echo "NEXT_PUBLIC_HOST=${public_host}" >> "$tmp"
@@ -181,6 +229,18 @@ write_env_vars() {
   fi
 
   pg_apply_env "$env_file" "$wt_identifier"
+}
+
+# --------------------------------------------------------------------------
+# Portable sed -i (BSD sed on macOS requires -i '', GNU sed uses -i)
+# --------------------------------------------------------------------------
+
+sedi() {
+  if sed --version &>/dev/null; then
+    sed -i "$@"
+  else
+    sed -i '' "$@"
+  fi
 }
 
 # --------------------------------------------------------------------------
@@ -211,6 +271,7 @@ Commands:
   main                       Switch to the main worktree
   switch                     Interactive worktree switcher (requires fzf)
   env-sync                   Copy main .env to all worktrees, preserving wt-specific vars
+  proxy [N|wtN|off]          Move PROXY_DOMAIN to a worktree (show current if no arg)
   merged                     Show worktrees whose branch PR has been merged
   db-backup [label]          Backup current worktree's databases (optional label)
   db-restore [timestamp]     Restore databases from a backup (fzf picker if no arg)
@@ -303,8 +364,21 @@ COMMANDS
 
     Copy the main worktree's apps/platform/.env to every wtN worktree, then
     re-apply each worktree's specific vars (POSTGRES_*, PORT, NEXT_PUBLIC_HOST,
-    NEXT_PUBLIC_SITE_URL). Run this after editing the primary .env to propagate
-    changes to all worktrees.
+    NEXT_PUBLIC_SITE_URL). PROXY_DOMAIN is preserved per-worktree (not copied
+    from main). Run this after editing the primary .env to propagate changes
+    to all worktrees.
+
+  wt proxy [N|wtN|off]
+
+    Move PROXY_DOMAIN to a specific worktree. Only one worktree at a time
+    has PROXY_DOMAIN set. The domain value is taken from whichever worktree
+    currently has it.
+
+    Examples:
+      wt proxy wt1      # set PROXY_DOMAIN on wt1, clear from others
+      wt proxy main     # set PROXY_DOMAIN on main, clear from others
+      wt proxy off      # clear PROXY_DOMAIN from all worktrees
+      wt proxy          # show which worktree has PROXY_DOMAIN
 
   wt help
 
@@ -916,6 +990,15 @@ cmd_list() {
       (( n > 1 )) && result+="/${parts[$n-1]}"
       display_dir="$result"
 
+      # Check for proxy domain
+      local wt_env_file
+      wt_env_file=$(env_file_for "$wt")
+      local proxy
+      proxy=$(read_proxy_domain "$wt_env_file")
+      if [[ -n "$proxy" ]]; then
+        status="proxy${status:+ ${status}}"
+      fi
+
       # Truncate long branch names
       if (( ${#branch} > 30 )); then
         branch="${branch:0:29}…"
@@ -928,6 +1011,115 @@ cmd_list() {
     echo -e "${BOLD}${header}${NC}"
     cat
   }
+}
+
+cmd_proxy() {
+  local target="${1:-}"
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  local repo
+  repo=$(repo_name)
+  local parent_dir
+  parent_dir=$(dirname "$main_dir")
+
+  # Collect all worktrees: (id, dir, port) tuples
+  local -a all_ids=() all_dirs=() all_ports=()
+
+  all_ids+=("main")
+  all_dirs+=("$main_dir")
+  all_ports+=("3000")
+
+  for dir in "$parent_dir/${repo}"-wt[0-9]*; do
+    [[ -d "$dir" ]] || continue
+    local name
+    name=$(basename "$dir")
+    local num="${name#"${repo}-wt"}"
+    if [[ "$num" =~ ^[0-9]+$ ]]; then
+      all_ids+=("wt${num}")
+      all_dirs+=("$dir")
+      all_ports+=("$((3000 + num))")
+    fi
+  done
+
+  # No argument: show which worktree has the proxy
+  if [[ -z "$target" ]]; then
+    local found=false
+    for i in "${!all_ids[@]}"; do
+      local env_file
+      env_file=$(env_file_for "${all_dirs[$i]}")
+      local domain
+      domain=$(read_proxy_domain "$env_file")
+      if [[ -n "$domain" ]]; then
+        echo -e "${GREEN}${all_ids[$i]}${NC} → ${domain}"
+        found=true
+      fi
+    done
+    if [[ "$found" == false ]]; then
+      echo -e "${YELLOW}No worktree has PROXY_DOMAIN set.${NC}"
+    fi
+    return
+  fi
+
+  # "off": clear from all
+  if [[ "$target" == "off" ]]; then
+    for i in "${!all_ids[@]}"; do
+      local env_file
+      env_file=$(env_file_for "${all_dirs[$i]}")
+      local domain
+      domain=$(read_proxy_domain "$env_file")
+      if [[ -n "$domain" ]]; then
+        clear_proxy_domain "$env_file" "${all_ports[$i]}"
+        echo -e "${YELLOW}${all_ids[$i]}${NC} cleared"
+      fi
+    done
+    return
+  fi
+
+  # Resolve target to index
+  local target_idx=""
+  for i in "${!all_ids[@]}"; do
+    if [[ "${all_ids[$i]}" == "$target" ]]; then
+      target_idx="$i"
+      break
+    fi
+  done
+
+  if [[ -z "$target_idx" ]]; then
+    echo -e "${RED}Unknown worktree: ${target}${NC}"
+    echo "Use: main, wt1, wt2, ... or off"
+    exit 1
+  fi
+
+  # Find the proxy domain value (from whoever currently has it, or main's .env)
+  local domain=""
+  for i in "${!all_ids[@]}"; do
+    local env_file
+    env_file=$(env_file_for "${all_dirs[$i]}")
+    domain=$(read_proxy_domain "$env_file")
+    [[ -n "$domain" ]] && break
+  done
+
+  if [[ -z "$domain" ]]; then
+    echo -e "${RED}No PROXY_DOMAIN found in any worktree's .env.${NC}"
+    echo "Add PROXY_DOMAIN=<domain> to your main .env first."
+    exit 1
+  fi
+
+  # Clear from all, set on target
+  for i in "${!all_ids[@]}"; do
+    local env_file
+    env_file=$(env_file_for "${all_dirs[$i]}")
+    if [[ "$i" == "$target_idx" ]]; then
+      set_proxy_domain "$env_file" "$domain"
+      echo -e "${GREEN}${all_ids[$i]}${NC} → ${domain}"
+    else
+      local prev
+      prev=$(read_proxy_domain "$env_file")
+      if [[ -n "$prev" ]]; then
+        clear_proxy_domain "$env_file" "${all_ports[$i]}"
+      fi
+    fi
+  done
 }
 
 cmd_main() {
@@ -989,7 +1181,19 @@ cmd_env_sync() {
       local port
       port=$(compute_port "$num")
 
+      # Preserve worktree-specific PROXY_DOMAIN across sync
+      local prev_proxy
+      prev_proxy=$(read_proxy_domain "$wt_env")
       cp "$main_env" "$wt_env"
+      # Strip PROXY_DOMAIN copied from main — it's worktree-specific
+      local tmp_sync
+      tmp_sync=$(mktemp)
+      grep -v '^PROXY_DOMAIN=' "$wt_env" > "$tmp_sync" || true
+      mv "$tmp_sync" "$wt_env"
+      # Restore if this worktree had it
+      if [[ -n "$prev_proxy" ]]; then
+        set_proxy_domain "$wt_env" "$prev_proxy"
+      fi
       write_env_vars "$wt_env" "$wt_id" "$port"
       echo -e "${GREEN}${wt_id}${NC} → $wt_env"
       ((++count))
@@ -1140,6 +1344,7 @@ case "$command" in
   main)       cmd_main ;;
   switch)     cmd_switch ;;
   env-sync)   cmd_env_sync ;;
+  proxy)      cmd_proxy "$@" ;;
   db-backup)  cmd_db_backup "$@" ;;
   db-restore) cmd_db_restore "$@" ;;
   merged)     cmd_merged ;;
