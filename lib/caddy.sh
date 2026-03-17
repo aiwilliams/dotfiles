@@ -33,7 +33,7 @@ caddy_certs_exist() {
 
 # Write a Caddyfile that routes $domain:$listen_port to $upstream_host:$upstream_port.
 # $1 = domain (e.g. opine.test)
-# $2 = listen port (e.g. 5000)
+# $2 = listen port (e.g. 5443)
 # $3 = upstream host (e.g. localhost or fw)
 # $4 = upstream port (e.g. 3001)
 caddy_write_config() {

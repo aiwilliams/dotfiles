@@ -152,7 +152,7 @@ clear_proxy_domain() {
 set_proxy_domain() {
   local env_file="$1"
   local domain="$2"
-  local proxy_port=5000
+  local proxy_port=5443
 
   if [[ -f "$env_file" ]]; then
     # Remove existing PROXY_DOMAIN line if present
@@ -200,7 +200,7 @@ write_env_vars() {
     proxy_domain=$(grep -E '^PROXY_DOMAIN=' "$env_file" | tail -1 | cut -d= -f2 | tr -d '"'"'" || true)
   fi
 
-  local proxy_port=5000
+  local proxy_port=5443
   local site_url public_host
   if [[ -n "$proxy_domain" ]]; then
     site_url="https://${proxy_domain}:${proxy_port}"
@@ -1034,7 +1034,7 @@ cmd_proxy() {
   done
 
   local target="${1:-}"
-  local listen_port=5000
+  local listen_port=5443
   local remote_mode=false
   [[ "$upstream_host" != "localhost" ]] && remote_mode=true
 
