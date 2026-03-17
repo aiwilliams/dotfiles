@@ -996,7 +996,7 @@ cmd_list() {
       local proxy
       proxy=$(read_proxy_domain "$wt_env_file")
       if [[ -n "$proxy" ]]; then
-        status="proxy${status:+ ${status}}"
+        status="${status:+${status} }proxy"
       fi
 
       # Truncate long branch names
@@ -1073,6 +1073,11 @@ cmd_proxy() {
       fi
     done
     return
+  fi
+
+  # Normalize: accept "6" or "wt6"
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    target="wt${target}"
   fi
 
   # Resolve target to index
