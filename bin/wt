@@ -870,6 +870,82 @@ cmd_remove() {
     fi
   fi
 
+  local wt_id="wt${n}"
+  local wt_dir
+  wt_dir=$(worktree_dir_for_number "$n")
+
+  if [[ ! -d "$wt_dir" ]]; then
+    echo -e "${RED}Worktree directory not found: ${wt_dir}${NC}"
+    exit 1
+  fi
+
+  # Gather branch info
+  local branch=""
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ "${wt_dir}") local found=1 ;;
+      branch\ *)   [[ "${found:-}" == "1" ]] && branch="${line#branch refs/heads/}" ;;
+      detached)    [[ "${found:-}" == "1" ]] && branch="(detached)" ;;
+      "")          [[ "${found:-}" == "1" ]] && break ;;
+    esac
+  done < <(git worktree list --porcelain; echo "")
+
+  # Check PR merge status
+  local pr_status=""
+  if [[ -n "$branch" && "$branch" != "(detached)" ]] && command -v gh &>/dev/null; then
+    local pr_state
+    pr_state=$(gh pr view "$branch" --json state --jq '.state' 2>/dev/null) || true
+    case "$pr_state" in
+      MERGED) pr_status="${GREEN}PR merged${NC}" ;;
+      OPEN)   pr_status="${YELLOW}PR open${NC}" ;;
+      CLOSED) pr_status="${YELLOW}PR closed (not merged)${NC}" ;;
+      *)      pr_status="no PR found" ;;
+    esac
+  fi
+
+  # Check dirty state
+  local staged=0 unstaged=0 untracked=0
+  while IFS= read -r sline; do
+    [[ -z "$sline" ]] && continue
+    local xy="${sline:0:2}"
+    if [[ "$xy" == "??" ]]; then
+      (( ++untracked ))
+    else
+      [[ "${xy:0:1}" != " " && "${xy:0:1}" != "?" ]] && (( ++staged )) || true
+      [[ "${xy:1:1}" != " " && "${xy:1:1}" != "?" ]] && (( ++unstaged )) || true
+    fi
+  done < <(git -C "$wt_dir" status --porcelain 2>/dev/null)
+
+  # Display summary
+  echo -e "${BOLD}Worktree:${NC}  ${wt_id}"
+  echo -e "${BOLD}Branch:${NC}   ${branch:-"(unknown)"}"
+  [[ -n "$pr_status" ]] && echo -e "${BOLD}PR:${NC}       ${pr_status}"
+  echo -e "${BOLD}Path:${NC}     ${wt_dir}"
+
+  local dirty=0
+  if (( staged || unstaged || untracked )); then
+    dirty=1
+    local status_parts=()
+    (( staged ))    && status_parts+=("${staged} staged")
+    (( unstaged ))  && status_parts+=("${unstaged} unstaged")
+    (( untracked )) && status_parts+=("${untracked} untracked")
+    echo -e "${BOLD}Status:${NC}   ${YELLOW}$(IFS=', '; echo "${status_parts[*]}")${NC}"
+  else
+    echo -e "${BOLD}Status:${NC}   clean"
+  fi
+
+  echo ""
+  if (( dirty )); then
+    echo -e "${RED}Warning: this will delete uncommitted changes and untracked files.${NC}"
+  fi
+
+  read -rp "Remove ${wt_id}? [y/N] " confirm
+  if [[ "$confirm" != [yY] ]]; then
+    echo "Aborted."
+    exit 0
+  fi
+
+  echo ""
   remove_one "$n"
 }
 
