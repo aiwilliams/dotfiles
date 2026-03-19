@@ -50,13 +50,27 @@ if ! command -v earlyoom &>/dev/null; then
 fi
 
 EARLYOOM_CONF="/etc/default/earlyoom"
-EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 5 -s 10 --avoid '(^|/)(tailscaled|sshd|systemd|containerd|dockerd)\$' --prefer '(^|/)(next-server|node|chrome|firefox)\$' -n\""
-if ! grep -qF -- '--avoid' "$EARLYOOM_CONF" 2>/dev/null; then
+EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 5 -s 10 --avoid '(^|/)(tailscaled|sshd|systemd|containerd|dockerd)\$' --prefer '(^|/)(next-server|node|tsgo|chrome|firefox)\$' -n\""
+if ! grep -qF 'tsgo' "$EARLYOOM_CONF" 2>/dev/null; then
   echo "Configuring earlyoom..."
   echo "$EARLYOOM_DESIRED" | sudo tee "$EARLYOOM_CONF" > /dev/null
-  sudo systemctl enable earlyoom
-  sudo systemctl restart earlyoom
 fi
+
+# Let earlyoom see all processes in /proc. The upstream unit uses DynamicUser=true
+# which prevents it from reading other users' entries under /proc.
+EARLYOOM_OVERRIDE="/etc/systemd/system/earlyoom.service.d/proc-access.conf"
+EARLYOOM_OVERRIDE_DESIRED="[Service]
+DynamicUser=false
+User=root"
+if [ ! -f "$EARLYOOM_OVERRIDE" ] || ! grep -q 'DynamicUser=false' "$EARLYOOM_OVERRIDE"; then
+  echo "Configuring earlyoom proc access..."
+  sudo mkdir -p /etc/systemd/system/earlyoom.service.d
+  echo "$EARLYOOM_OVERRIDE_DESIRED" | sudo tee "$EARLYOOM_OVERRIDE" > /dev/null
+  sudo systemctl daemon-reload
+fi
+
+sudo systemctl enable earlyoom
+sudo systemctl restart earlyoom
 
 # --- Kernel tuning ---
 
