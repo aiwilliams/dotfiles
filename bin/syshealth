@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# syshealth — Quick system health overview focused on memory, OOM, and network.
+#
+# Usage:
+#   syshealth            Full status report
+#   syshealth watch      Loop every 60s, only print + bell on problems
+#   syshealth watch 30   Loop every 30s
+
+set -euo pipefail
+
+bold='\033[1m'
+red='\033[31m'
+green='\033[32m'
+yellow='\033[33m'
+reset='\033[0m'
+
+section() { printf "\n${bold}── %s${reset}\n" "$1"; }
+bell() { printf '\a'; }
+
+# Thresholds
+MEM_WARN_PCT=25    # warn when available memory drops below this % of total
+SLICE_WARN_PCT=75  # warn when Docker slice usage exceeds this % of its limit
+
+# --- Collect checks (used by both modes) ---
+
+collect_alerts() {
+  alerts=()
+
+  # Memory
+  read -r mem_total mem_avail < <(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{print t, a}' /proc/meminfo)
+  mem_pct=$(( mem_avail * 100 / mem_total ))
+  if [ "$mem_pct" -lt "$MEM_WARN_PCT" ]; then
+    alerts+=("$(printf "${red}Memory: %d%% available (%d MB free of %d MB)${reset}" \
+      "$mem_pct" "$(( mem_avail / 1024 ))" "$(( mem_total / 1024 ))")")
+  fi
+
+  # Docker slice
+  if systemctl is-active docker-containers.slice &>/dev/null; then
+    read -r slice_used < /sys/fs/cgroup/docker.slice/docker-containers.slice/memory.current 2>/dev/null || slice_used=0
+    read -r slice_max < /sys/fs/cgroup/docker.slice/docker-containers.slice/memory.max 2>/dev/null || slice_max=1
+    slice_pct=$(( slice_used * 100 / slice_max ))
+    if [ "$slice_pct" -gt "$SLICE_WARN_PCT" ]; then
+      alerts+=("$(printf "${red}Docker slice: %d%% of limit (%sG / %sG)${reset}" \
+        "$slice_pct" \
+        "$(awk "BEGIN{printf \"%.1f\", $slice_used/1073741824}")" \
+        "$(awk "BEGIN{printf \"%.0f\", $slice_max/1073741824}")")")
+    fi
+  else
+    alerts+=("$(printf "${red}Docker slice: inactive${reset}")")
+  fi
+
+  # earlyoom
+  if ! systemctl is-active earlyoom &>/dev/null; then
+    alerts+=("$(printf "${red}earlyoom: not running!${reset}")")
+  fi
+
+  # earlyoom kills
+  kills=$(journalctl -u earlyoom --since "10 minutes ago" --no-pager 2>/dev/null \
+    | grep -c "sending SIGTERM to process\|sending SIGKILL to process" || true)
+  if [ "$kills" -gt 0 ]; then
+    alerts+=("$(printf "${red}earlyoom: %d kill(s) in last 10 min${reset}" "$kills")")
+  fi
+
+  # Kernel OOM
+  oom_events=$(journalctl --since "10 minutes ago" --no-pager 2>/dev/null | grep -c "Out of memory:" || true)
+  if [ "$oom_events" -gt 0 ]; then
+    alerts+=("$(printf "${red}Kernel OOM: %d kill(s) in last 10 min${reset}" "$oom_events")")
+  fi
+
+  # Network
+  gw=$(ip route | awk '/^default/ {print $3; exit}')
+  if [ -z "$gw" ]; then
+    alerts+=("$(printf "${red}Network: no default gateway${reset}")")
+  elif ! ping -c 1 -W 2 "$gw" &>/dev/null; then
+    alerts+=("$(printf "${red}Network: gateway %s unreachable${reset}" "$gw")")
+  fi
+
+  # Tailscale
+  ts_state=$(tailscale status --self --json 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('BackendState','?'))" 2>/dev/null || echo "?")
+  if [ "$ts_state" != "Running" ]; then
+    alerts+=("$(printf "${red}Tailscale: %s${reset}" "$ts_state")")
+  fi
+
+  # Network watchdog
+  if ! systemctl is-active network-watchdog.timer &>/dev/null; then
+    alerts+=("$(printf "${yellow}Network watchdog timer: inactive${reset}")")
+  fi
+}
+
+# --- Watch mode ---
+
+watch_mode() {
+  local interval="${1:-60}"
+  printf "Monitoring every %ds (Ctrl-C to stop)...\n" "$interval"
+  while true; do
+    collect_alerts
+    if [ ${#alerts[@]} -gt 0 ]; then
+      bell
+      printf "\n${bold}${red}── ALERT %s${reset}\n" "$(date '+%H:%M:%S')"
+      for a in "${alerts[@]}"; do
+        printf "  %b\n" "$a"
+      done
+    fi
+    sleep "$interval"
+  done
+}
+
+# --- Full report mode ---
+
+full_report() {
+  # --- Memory ---
+  section "Memory"
+  free -h | awk 'NR<=2'
+  printf "  min_free_kbytes: %s MB\n" "$(( $(cat /proc/sys/vm/min_free_kbytes) / 1024 ))"
+
+  # --- Docker slice ---
+  section "Docker slice"
+  if systemctl is-active docker-containers.slice &>/dev/null; then
+    read -r used < /sys/fs/cgroup/docker.slice/docker-containers.slice/memory.current 2>/dev/null || used=0
+    read -r high < /sys/fs/cgroup/docker.slice/docker-containers.slice/memory.high 2>/dev/null || high=0
+    read -r max < /sys/fs/cgroup/docker.slice/docker-containers.slice/memory.max 2>/dev/null || max=0
+    printf "  used: %sG / high: %sG / max: %sG\n" \
+      "$(awk "BEGIN{printf \"%.1f\", $used/1073741824}")" \
+      "$(awk "BEGIN{printf \"%.0f\", $high/1073741824}")" \
+      "$(awk "BEGIN{printf \"%.0f\", $max/1073741824}")"
+  else
+    printf "  ${red}inactive${reset}\n"
+  fi
+
+  # --- Airbyte container ---
+  section "Airbyte container"
+  if docker inspect airbyte-abctl-control-plane &>/dev/null 2>&1; then
+    docker stats --no-stream --format "  {{.Name}}: {{.MemUsage}} ({{.MemPerc}})" airbyte-abctl-control-plane 2>/dev/null
+    # Pod limits
+    docker exec airbyte-abctl-control-plane kubectl get pods -n airbyte-abctl --no-headers \
+      -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,LIMIT:.spec.containers[0].resources.limits.memory' \
+      2>/dev/null | grep -v bootloader | sed 's/^/  /'
+  else
+    printf "  ${yellow}not running${reset}\n"
+  fi
+
+  # --- earlyoom ---
+  section "earlyoom"
+  if systemctl is-active earlyoom &>/dev/null; then
+    # Show current memory reading
+    journalctl -u earlyoom --no-pager -n 1 -o cat 2>/dev/null | sed 's/^/  /'
+    # Show any kills in the last 24h
+    kills=$(journalctl -u earlyoom --since "24 hours ago" --no-pager 2>/dev/null | grep -c "sending SIGTERM to process\|sending SIGKILL to process" || true)
+    if [ "$kills" -gt 0 ]; then
+      printf "  ${red}%d kill(s) in last 24h:${reset}\n" "$kills"
+      journalctl -u earlyoom --since "24 hours ago" --no-pager 2>/dev/null | grep "sending SIGTERM to process\|sending SIGKILL to process" | tail -5 | sed 's/^/    /'
+    else
+      printf "  ${green}no kills in last 24h${reset}\n"
+    fi
+  else
+    printf "  ${red}inactive!${reset}\n"
+  fi
+
+  # --- OOM killer (kernel) ---
+  section "Kernel OOM kills (last 24h)"
+  oom_events=$(journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep -c "Out of memory:" || true)
+  if [ "$oom_events" -gt 0 ]; then
+    printf "  ${red}%d kernel OOM kill(s)${reset}\n" "$oom_events"
+    journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep "Out of memory:" | tail -5 | sed 's/^/    /'
+  else
+    printf "  ${green}none${reset}\n"
+  fi
+
+  # --- OOM protection ---
+  section "OOM protection"
+  for svc in tailscaled sshd; do
+    pid=$(pgrep -x "$svc" -o 2>/dev/null || true)
+    if [ -n "$pid" ]; then
+      score=$(cat "/proc/$pid/oom_score_adj" 2>/dev/null || echo "?")
+      printf "  %s (pid %s): oom_score_adj=%s\n" "$svc" "$pid" "$score"
+    else
+      printf "  %s: ${yellow}not running${reset}\n" "$svc"
+    fi
+  done
+
+  # --- Network ---
+  section "Network"
+  gw=$(ip route | awk '/^default/ {print $3; exit}')
+  if [ -n "$gw" ]; then
+    if ping -c 1 -W 2 "$gw" &>/dev/null; then
+      printf "  ${green}gateway %s reachable${reset}\n" "$gw"
+    else
+      printf "  ${red}gateway %s unreachable${reset}\n" "$gw"
+    fi
+  else
+    printf "  ${red}no default gateway${reset}\n"
+  fi
+  ts_status=$(tailscale status --self --json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('BackendState','?'))" 2>/dev/null || echo "?")
+  printf "  tailscale: %s\n" "$ts_status"
+  printf "  watchdog timer: %s\n" "$(systemctl is-active network-watchdog.timer 2>/dev/null)"
+
+  # --- Top memory consumers ---
+  section "Top memory consumers"
+  ps aux --sort=-%mem --no-headers | head -5 | awk '{printf "  %5.1f%%  %s\n", $4, $11}'
+}
+
+# --- Main ---
+
+case "${1:-}" in
+  watch) watch_mode "${2:-60}" ;;
+  *)     full_report ;;
+esac
