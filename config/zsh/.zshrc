@@ -45,10 +45,6 @@ case "$(uname -s)" in
     alias pbcopy='printf "\033]52;c;%s\a" "$(base64)"'
     # SSH key via keychain
     eval "$(keychain --eval --quiet --agents ssh id_ed25519_$(hostname))"
-    # Reset OOM score so child processes (node, tsgo, etc.) are killable by
-    # earlyoom. Tailscale SSH inherits tailscaled's -900 OOMScoreAdjust, which
-    # makes every process in the session nearly immune to the OOM killer.
-    (( $(</proc/self/oom_score_adj) < 0 )) 2>/dev/null && echo 0 > /proc/self/oom_score_adj
     ;;
 esac
 
