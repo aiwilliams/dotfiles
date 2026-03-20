@@ -1,0 +1,92 @@
+# Airbyte Helm values — memory limits for local abctl installation.
+#
+# Without these, every JVM uses -XX:MaxRAMPercentage=75.0 against the full
+# host RAM (64GB), so each JVM thinks it can use ~48GB. With 5+ JVMs running
+# concurrently, the system runs out of memory.
+#
+# Apply with:  abctl local install --values config/airbyte/values.yaml
+#
+# Budget: 32GB total for the k3s container
+#   Core services:  ~12GB (server, cron, worker, temporal, etc.)
+#   Job containers: ~12GB (2-3 concurrent syncs at 4GB each)
+#   PostgreSQL:      ~2GB
+#   k3s overhead:    ~2GB (apiserver, etcd, kubelet, coredns)
+#   Buffer:          ~4GB
+
+server:
+  resources:
+    requests:
+      memory: "2Gi"
+    limits:
+      memory: "3Gi"
+
+cron:
+  resources:
+    requests:
+      memory: "512Mi"
+    limits:
+      memory: "1Gi"
+
+worker:
+  resources:
+    requests:
+      memory: "1Gi"
+    limits:
+      memory: "2Gi"
+
+workloadApiServer:
+  resources:
+    requests:
+      memory: "512Mi"
+    limits:
+      memory: "1Gi"
+
+workloadLauncher:
+  resources:
+    requests:
+      memory: "1Gi"
+    limits:
+      memory: "2Gi"
+
+temporal:
+  resources:
+    requests:
+      memory: "512Mi"
+    limits:
+      memory: "1Gi"
+
+postgresql:
+  resources:
+    requests:
+      memory: "1Gi"
+    limits:
+      memory: "2Gi"
+
+global:
+  workloads:
+    resources:
+      # Sync job containers (dynamically spawned per connection sync)
+      mainContainer:
+        memory:
+          request: "1Gi"
+          limit: "4Gi"
+      # Check connection containers
+      check:
+        memory:
+          request: "256Mi"
+          limit: "1Gi"
+      # Schema discovery containers
+      discover:
+        memory:
+          request: "256Mi"
+          limit: "1Gi"
+      # Replication orchestrator
+      replication:
+        memory:
+          request: "1Gi"
+          limit: "4Gi"
+      # Sidecar containers
+      sidecar:
+        memory:
+          request: "256Mi"
+          limit: "512Mi"

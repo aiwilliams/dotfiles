@@ -57,6 +57,18 @@ elif ! grep -q 'cgroup-parent' "$DOCKER_DAEMON_JSON"; then
   echo '  "cgroup-parent": "docker-containers.slice"'
 fi
 
+# Cap Airbyte's k3s container to 32GB so JVMs using -XX:MaxRAMPercentage see
+# a realistic limit instead of the full host RAM. Pods must restart to pick up
+# the new cgroup limit (abctl local install --values handles this).
+if docker inspect airbyte-abctl-control-plane &>/dev/null; then
+  CURRENT_MEM=$(docker inspect airbyte-abctl-control-plane --format '{{.HostConfig.Memory}}')
+  TARGET_MEM=$((32 * 1024 * 1024 * 1024))  # 32G in bytes
+  if [ "$CURRENT_MEM" != "$TARGET_MEM" ]; then
+    echo "Setting Airbyte container memory limit to 32G..."
+    docker update --memory 32g --memory-swap 36g airbyte-abctl-control-plane
+  fi
+fi
+
 # --- Locale ---
 
 if ! locale -a 2>/dev/null | grep -qi 'en_US\.utf'; then
