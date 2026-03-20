@@ -23,7 +23,7 @@ wt() {
   case "${1:-}" in
     switch|main)
       local dir
-      dir=$(command wt "$1") || return
+      dir=$(command wt "$@") || return
       [[ -n "$dir" ]] && cd "$dir"
       ;;
     create)

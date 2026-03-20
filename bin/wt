@@ -13,9 +13,10 @@
 #   wt list                             List all worktrees with status
 #   wt main                             Switch to the main worktree
 #   wt merged                           Show worktrees whose branch PR has been merged
-#   wt switch                           Interactive worktree switcher (requires fzf)
+#   wt switch [N|wtN|main]               Switch to worktree (fzf picker if no arg)
 #   wt env-sync                         Copy main .env to all worktrees
 #   wt proxy [options] [N|off]           Route HTTPS proxy to a worktree
+#   wt ngrok [N|wtN|off]                Tunnel a worktree's port via ngrok
 #   wt db-backup [label]                Backup current worktree's databases
 #   wt db-restore [timestamp]           Restore databases from a backup
 
@@ -30,6 +31,8 @@ source "$LIB_DIR/postgres.sh"
 source "$LIB_DIR/projects.sh"
 # shellcheck source=../lib/caddy.sh
 source "$LIB_DIR/caddy.sh"
+# shellcheck source=../lib/ngrok.sh
+source "$LIB_DIR/ngrok.sh"
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -270,9 +273,10 @@ Commands:
   remove --merged                Remove all worktrees with merged PRs
   list                           List all worktrees with ID, branch, port, and status
   main                           Switch to the main worktree
-  switch                         Interactive worktree switcher (requires fzf)
+  switch [N|wtN|main]            Switch to worktree (interactive fzf picker if no arg)
   env-sync                       Copy main .env to all worktrees, preserving wt-specific vars
   proxy [options] [N|wtN|off]    Route HTTPS proxy to a worktree (show current if no arg)
+  ngrok [N|wtN|off]              Tunnel a worktree's port via ngrok (show status if no arg)
   merged                         Show worktrees whose branch PR has been merged
   db-backup [label]              Backup current worktree's databases (optional label)
   db-restore [timestamp]         Restore databases from a backup (fzf picker if no arg)
@@ -347,10 +351,10 @@ COMMANDS
 
     Switch to the main worktree directory.
 
-  wt switch
+  wt switch [N|wtN|main]
 
-    Interactive fzf picker to select a worktree and print its path. Useful
-    with cd: cd $(wt switch)
+    Print a worktree path. With no argument, opens an interactive fzf picker.
+    With a number, prints the path directly. Useful with cd: cd $(wt switch 2)
 
   wt merged
 
@@ -384,6 +388,20 @@ COMMANDS
       wt proxy                            # show current routing
       wt proxy --host fw 6                # remote: route to fw:3006
       wt proxy --host fw --domain d.test 6  # remote: explicit domain
+
+  wt ngrok [N|wtN|off]
+
+    Tunnel a worktree's port via ngrok for external webhook access.
+
+    Requires NGROK_DOMAIN in your environment (e.g. via ~/.zshrc.local):
+      export NGROK_DOMAIN="your-domain.ngrok-free.app"
+
+    Examples:
+      wt ngrok 1                      # tunnel to wt1 (port 3001)
+      wt ngrok main                   # tunnel to main (port 3000)
+      wt ngrok off                    # stop ngrok
+      wt ngrok                        # show current tunnel status
+      wt ngrok log                    # tail the ngrok log
 
   wt help
 
@@ -1286,6 +1304,33 @@ cmd_main() {
 }
 
 cmd_switch() {
+  local arg="${1:-}"
+
+  if [[ -n "$arg" ]]; then
+    # Direct switch: accept "3" or "wt3" or "main"
+    if [[ "$arg" == "main" ]]; then
+      echo "$(main_worktree_dir)"
+      return
+    fi
+
+    local n="${arg#wt}"
+    if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+      echo "Invalid worktree identifier: ${arg}" >&2
+      echo "Usage: wt switch [N|wtN|main]" >&2
+      exit 1
+    fi
+
+    local wt_dir
+    wt_dir=$(worktree_dir_for_number "$n")
+    if [[ ! -d "$wt_dir" ]]; then
+      echo "Worktree not found: wt${n}" >&2
+      exit 1
+    fi
+
+    echo "$wt_dir"
+    return
+  fi
+
   if ! command -v fzf &>/dev/null; then
     echo "fzf is required for interactive switching. Install it or use 'cd' directly." >&2
     echo "" >&2
@@ -1486,6 +1531,53 @@ cmd_db_restore() {
   pg_restore_worktree_dbs "$wt_id" "$backup_subdir"
 }
 
+cmd_ngrok() {
+  local target="${1:-}"
+
+  # No argument: show status
+  if [[ -z "$target" ]]; then
+    echo -n "ngrok: "
+    ngrok_status
+    return
+  fi
+
+  # "off": stop ngrok
+  if [[ "$target" == "off" ]]; then
+    ngrok_stop
+    echo "ngrok stopped."
+    return
+  fi
+
+  # "log": tail the log file
+  if [[ "$target" == "log" ]]; then
+    if [[ -f "$NGROK_LOGFILE" ]]; then
+      tail -f "$NGROK_LOGFILE"
+    else
+      echo "No log file yet. Start ngrok first."
+    fi
+    return
+  fi
+
+  # Normalize: accept "6" or "wt6"
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    target="wt${target}"
+  fi
+  if [[ "$target" != "main" ]] && ! [[ "$target" =~ ^wt[0-9]+$ ]]; then
+    echo -e "${RED}Unknown target: ${target}${NC}"
+    echo "Use: main, wt1, wt2, ... or off"
+    exit 1
+  fi
+
+  local target_port
+  target_port=$(proxy_target_to_port "$target")
+
+  ngrok_start "$target_port"
+
+  local domain
+  domain=$(ngrok_domain)
+  echo -e "${GREEN}https://${domain}${NC} → localhost:${target_port}"
+}
+
 # --- Main dispatch ---
 
 ensure_in_repo
@@ -1501,9 +1593,10 @@ case "$command" in
   remove)     cmd_remove "$@" ;;
   list)       cmd_list ;;
   main)       cmd_main ;;
-  switch)     cmd_switch ;;
+  switch)     cmd_switch "$@" ;;
   env-sync)   cmd_env_sync ;;
   proxy)      cmd_proxy "$@" ;;
+  ngrok)      cmd_ngrok "$@" ;;
   db-backup)  cmd_db_backup "$@" ;;
   db-restore) cmd_db_restore "$@" ;;
   merged)     cmd_merged ;;
