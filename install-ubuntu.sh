@@ -20,6 +20,43 @@ if ! groups "$USER" | grep -q '\bdocker\b'; then
   echo "NOTE: Log out and back in (or run 'newgrp docker') for group change to take effect."
 fi
 
+# --- Docker resource limits ---
+
+# Cap total Docker container memory to prevent containers from consuming all system RAM.
+DOCKER_SLICE="/etc/systemd/system/docker-containers.slice"
+if [ ! -f "$DOCKER_SLICE" ]; then
+  echo "Creating Docker container memory limit slice (40G soft / 45G hard)..."
+  cat <<'UNIT' | sudo tee "$DOCKER_SLICE" > /dev/null
+[Unit]
+Description=Limit total Docker container memory
+Before=slices.target
+
+[Slice]
+MemoryHigh=40G
+MemoryMax=45G
+UNIT
+  sudo systemctl daemon-reload
+fi
+
+DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
+if [ ! -f "$DOCKER_DAEMON_JSON" ]; then
+  echo "Configuring Docker daemon (cgroup parent, log rotation)..."
+  cat <<'JSON' | sudo tee "$DOCKER_DAEMON_JSON" > /dev/null
+{
+  "cgroup-parent": "docker-containers.slice",
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "50m",
+    "max-file": "3"
+  }
+}
+JSON
+  sudo systemctl restart docker
+elif ! grep -q 'cgroup-parent' "$DOCKER_DAEMON_JSON"; then
+  echo "WARNING: $DOCKER_DAEMON_JSON exists but missing cgroup-parent. Add manually:"
+  echo '  "cgroup-parent": "docker-containers.slice"'
+fi
+
 # --- Locale ---
 
 if ! locale -a 2>/dev/null | grep -qi 'en_US\.utf'; then
@@ -43,6 +80,18 @@ UNIT
   sudo systemctl restart tailscaled
 fi
 
+# Protect sshd from OOM killer
+SSHD_OVERRIDE="/etc/systemd/system/ssh.service.d/oom-protect.conf"
+if [ ! -f "$SSHD_OVERRIDE" ]; then
+  echo "Protecting sshd from OOM killer..."
+  sudo mkdir -p /etc/systemd/system/ssh.service.d
+  cat <<'UNIT' | sudo tee "$SSHD_OVERRIDE" > /dev/null
+[Service]
+OOMScoreAdjust=-900
+UNIT
+  sudo systemctl daemon-reload
+fi
+
 # Install earlyoom to kill memory hogs before the system becomes unresponsive
 if ! command -v earlyoom &>/dev/null; then
   echo "Installing earlyoom..."
@@ -50,8 +99,8 @@ if ! command -v earlyoom &>/dev/null; then
 fi
 
 EARLYOOM_CONF="/etc/default/earlyoom"
-EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 5 -s 10 --avoid '(^|/)(tailscaled|sshd|systemd|containerd|dockerd)\$' --prefer '(^|/)(next-server|node|tsgo|chrome|firefox)\$' -n\""
-if ! grep -qF 'tsgo' "$EARLYOOM_CONF" 2>/dev/null; then
+EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 10,5 -s 100,100 -r 3600 --avoid '(^|/)(tailscaled|sshd|systemd|containerd|dockerd)\$' --prefer '(^|/)(java|next-server|node|tsgo|chrome|firefox)\$' -n\""
+if ! grep -qF -- '-m 10,5' "$EARLYOOM_CONF" 2>/dev/null; then
   echo "Configuring earlyoom..."
   echo "$EARLYOOM_DESIRED" | sudo tee "$EARLYOOM_CONF" > /dev/null
 fi
@@ -79,6 +128,99 @@ if [ ! -f "$SYSCTL_INOTIFY" ]; then
   echo "Increasing inotify watch limit..."
   echo "fs.inotify.max_user_watches=524288" | sudo tee "$SYSCTL_INOTIFY" > /dev/null
   sudo sysctl --system
+fi
+
+SYSCTL_MEMORY="/etc/sysctl.d/60-memory.conf"
+if [ ! -f "$SYSCTL_MEMORY" ]; then
+  echo "Reserving 512MB kernel memory for network processing under pressure..."
+  echo "vm.min_free_kbytes=524288" | sudo tee "$SYSCTL_MEMORY" > /dev/null
+  sudo sysctl --system
+fi
+
+# --- Network resilience (keep machine accessible remotely) ---
+
+# Make NetworkManager retry DHCP forever instead of giving up after 4 attempts
+WIRED_CONN=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep ':802-3-ethernet$' | head -1 | cut -d: -f1)
+if [ -n "$WIRED_CONN" ]; then
+  CURRENT_RETRIES=$(nmcli -t -f connection.autoconnect-retries connection show "$WIRED_CONN" 2>/dev/null | cut -d: -f2)
+  if [ "$CURRENT_RETRIES" != "0" ]; then
+    echo "Configuring DHCP to retry forever on $WIRED_CONN..."
+    sudo nmcli connection modify "$WIRED_CONN" \
+      connection.autoconnect-retries 0 \
+      ipv4.dhcp-timeout 2147483647
+  fi
+fi
+
+# Network watchdog: check gateway reachability, restart NetworkManager if down
+WATCHDOG_SCRIPT="/usr/local/bin/network-watchdog.sh"
+cat <<'SCRIPT' | sudo tee "$WATCHDOG_SCRIPT" > /dev/null
+#!/usr/bin/env bash
+set -euo pipefail
+
+GATEWAY=$(ip route | awk '/^default/ {print $3; exit}')
+
+if [ -z "$GATEWAY" ]; then
+  logger -t network-watchdog "No default gateway, restarting NetworkManager"
+  systemctl restart NetworkManager
+  exit 0
+fi
+
+if ! ping -c 3 -W 5 "$GATEWAY" &>/dev/null; then
+  logger -t network-watchdog "Gateway $GATEWAY unreachable, restarting NetworkManager"
+  systemctl restart NetworkManager
+fi
+SCRIPT
+sudo chmod 755 "$WATCHDOG_SCRIPT"
+
+WATCHDOG_SERVICE="/etc/systemd/system/network-watchdog.service"
+if [ ! -f "$WATCHDOG_SERVICE" ]; then
+  echo "Installing network watchdog timer..."
+  cat <<'UNIT' | sudo tee "$WATCHDOG_SERVICE" > /dev/null
+[Unit]
+Description=Network connectivity watchdog
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/network-watchdog.sh
+UNIT
+
+  cat <<'UNIT' | sudo tee /etc/systemd/system/network-watchdog.timer > /dev/null
+[Unit]
+Description=Run network watchdog every 2 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now network-watchdog.timer
+fi
+
+# Restart Tailscale promptly when the physical network interface recovers
+TAILSCALE_DISPATCHER="/etc/NetworkManager/dispatcher.d/99-restart-tailscale"
+if [ ! -f "$TAILSCALE_DISPATCHER" ]; then
+  echo "Installing Tailscale network recovery dispatcher..."
+  cat <<'DISPATCH' | sudo tee "$TAILSCALE_DISPATCHER" > /dev/null
+#!/bin/bash
+INTERFACE=$1
+ACTION=$2
+
+# Ignore virtual interfaces
+case "$INTERFACE" in
+  lo|docker*|br-*|veth*|tailscale*) exit 0 ;;
+esac
+
+if [ "$ACTION" = "up" ]; then
+  logger -t nm-dispatcher "Interface $INTERFACE came up, restarting tailscaled"
+  systemctl restart tailscaled
+fi
+DISPATCH
+  sudo chmod 755 "$TAILSCALE_DISPATCHER"
 fi
 
 # --- GitHub CLI ---
