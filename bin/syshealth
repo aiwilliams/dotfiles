@@ -111,7 +111,7 @@ watch_mode() {
 full_report() {
   # --- Memory ---
   section "Memory"
-  free -h | awk 'NR<=2'
+  free -h | awk 'NR<=3'
   printf "  min_free_kbytes: %s MB\n" "$(( $(cat /proc/sys/vm/min_free_kbytes) / 1024 ))"
 
   # --- Docker slice ---
@@ -143,8 +143,21 @@ full_report() {
   # --- earlyoom ---
   section "earlyoom"
   if systemctl is-active earlyoom &>/dev/null; then
-    # Show current memory reading
-    journalctl -u earlyoom --no-pager -n 1 -o cat 2>/dev/null | sed 's/^/  /'
+    # Show current memory reading with age
+    last_ts=$(journalctl -u earlyoom --no-pager -n 1 -o short-unix 2>/dev/null | awk '{print int($1)}')
+    last_msg=$(journalctl -u earlyoom --no-pager -n 1 -o cat 2>/dev/null)
+    if [ -n "$last_ts" ] && [ "$last_ts" -gt 0 ] 2>/dev/null; then
+      age=$(( $(date +%s) - last_ts ))
+      if [ "$age" -lt 60 ]; then
+        age_str="${age}s ago"
+      elif [ "$age" -lt 3600 ]; then
+        age_str="$(( age / 60 ))m ago"
+      else
+        age_str="$(( age / 3600 ))h$(( (age % 3600) / 60 ))m ago"
+      fi
+      printf "  %s\n" "$last_msg"
+      printf "  ${yellow}(last reading: %s)${reset}\n" "$age_str"
+    fi
     # Show any kills in the last 24h
     kills=$(journalctl -u earlyoom --since "24 hours ago" --no-pager 2>/dev/null | grep -c "sending SIGTERM to process\|sending SIGKILL to process" || true)
     if [ "$kills" -gt 0 ]; then
