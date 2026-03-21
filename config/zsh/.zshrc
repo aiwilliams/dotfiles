@@ -12,6 +12,8 @@ source "$ZSH/oh-my-zsh.sh"
 
 # --- Environment ---
 
+export PNPM_HOME="$HOME/.local/share/pnpm"
+export PATH="$HOME/.local/bin:$PNPM_HOME:$PATH"
 export NX_TUI=false
 
 # --- Aliases & Functions ---

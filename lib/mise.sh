@@ -10,9 +10,13 @@ else
   curl -fsSL https://mise.run | sh
 fi
 
-# Ensure mise is activated in current shell
-eval "$("$HOME/.local/bin/mise" activate bash)"
+# Ensure mise is on PATH for this script
+export PATH="$HOME/.local/bin:$PATH"
 
-# Install global tools (skip if already installed)
-mise ls -g node &>/dev/null || mise use -g node@latest
-mise ls -g pnpm &>/dev/null || mise use -g pnpm@latest
+# Install global tools (idempotent — skips if already at latest)
+mise use -g node@latest
+mise use -g pnpm@latest
+
+# Add mise-managed tools to PATH for subsequent scripts
+export PNPM_HOME="$HOME/.local/share/pnpm"
+export PATH="$PNPM_HOME:$HOME/.local/share/mise/shims:$PATH"
