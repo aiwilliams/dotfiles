@@ -3,8 +3,27 @@ set -euo pipefail
 
 echo "Running macOS setup..."
 
+# --- Homebrew ---
+
+if ! command -v brew &>/dev/null; then
+  echo "Installing Homebrew..."
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+else
+  echo "Updating Homebrew..."
+  brew update
+fi
+
 brew install tmux gh fzf shellcheck yq gitleaks mkcert caddy
 brew install --cask ngrok
+
+# --- Docker via Colima ---
+
+echo "Installing Colima + Docker CLI..."
+brew install colima docker docker-compose
+if ! colima status &>/dev/null 2>&1; then
+  colima start
+fi
 
 # --- PostgreSQL 18 + pgvector via Homebrew ---
 
