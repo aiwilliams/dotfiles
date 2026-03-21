@@ -10,10 +10,27 @@ git config --global init.defaultBranch main
 source "$SCRIPT_DIR/lib/ssh-signing-key.sh"
 if resolve_signing_key; then
   SSH_KEY="$SSH_SIGNING_KEY"
-  git config --global gpg.format ssh
-  git config --global user.signingkey "$SSH_KEY.pub"
-  git config --global commit.gpgsign true
-  git config --global tag.gpgsign true
+
+  # Detect agent-based signing (e.g. 1Password): signingkey is a raw public key
+  # string rather than a file path, and gpg.ssh.program is already configured.
+  SSH_PROGRAM="$(git config --global gpg.ssh.program 2>/dev/null || true)"
+  if [ -n "$SSH_PROGRAM" ] && [[ "$SSH_KEY" == ssh-* || "$SSH_KEY" == ecdsa-* ]]; then
+    # Agent-based setup (1Password, etc.) — preserve existing config
+    git config --global gpg.format ssh
+    git config --global commit.gpgsign true
+    git config --global tag.gpgsign true
+    PUBKEY="$SSH_KEY"
+  else
+    # File-based key
+    git config --global gpg.format ssh
+    git config --global user.signingkey "$SSH_KEY.pub"
+    git config --global commit.gpgsign true
+    git config --global tag.gpgsign true
+    PUBKEY=""
+    if [ -f "$SSH_KEY.pub" ]; then
+      PUBKEY="$(cat "$SSH_KEY.pub")"
+    fi
+  fi
 
   # Allowed signers file for local signature verification
   ALLOWED_SIGNERS="$HOME/.ssh/allowed_signers"
@@ -22,11 +39,9 @@ if resolve_signing_key; then
     echo "WARNING: git user.email not set, skipping allowed signers setup"
     echo "  Run: git config --global user.email you@example.com" # gitleaks:allow
     echo "  Then re-run ./configure.sh to enable local signature verification"
-  elif [ ! -f "$SSH_KEY.pub" ]; then
-    echo "WARNING: Public key $SSH_KEY.pub not found, skipping allowed signers setup"
-    echo "  Regenerate with: ssh-keygen -y -f \"$SSH_KEY\" > \"$SSH_KEY.pub\""
+  elif [ -z "$PUBKEY" ]; then
+    echo "WARNING: Could not determine public key, skipping allowed signers setup"
   else
-    PUBKEY="$(cat "$SSH_KEY.pub")"
     SIGNING_EMAILS_FILE="$HOME/.config/git/signing-emails"
     EMAILS=("$GIT_EMAIL")
     if [ -f "$SIGNING_EMAILS_FILE" ]; then
@@ -47,41 +62,19 @@ if resolve_signing_key; then
     git config --global gpg.ssh.allowedSignersFile "$ALLOWED_SIGNERS"
   fi
 
-  echo "Configured git commit signing with $SSH_KEY"
+  echo "Configured git commit signing with ${SSH_PROGRAM:+$SSH_PROGRAM + }$SSH_KEY"
   if [ "$SSH_SIGNING_KEY_ON_GITHUB" = "false" ]; then
     echo "Note: This key is not yet registered as a signing key on GitHub"
     echo "  Add it at https://github.com/settings/ssh/new"
-    echo "  Public key:"
-    echo "  $(cat "$SSH_KEY.pub")"
+    if [ -n "$PUBKEY" ]; then
+      echo "  Public key:"
+      echo "  $PUBKEY"
+    fi
   fi
 else
   echo "WARNING: No SSH key found, skipping commit signing setup"
   echo "  Generate one with: ssh-keygen -t ed25519"
   echo "  Then re-run ./configure.sh"
-fi
-
-# Shell environment variables
-if ! grep -qF "NX_TUI" "$HOME/.bashrc"; then
-  echo '' >> "$HOME/.bashrc"
-  echo '# Disable Nx TUI (incompatible with non-interactive shells)' >> "$HOME/.bashrc"
-  echo 'export NX_TUI=false' >> "$HOME/.bashrc"
-  echo "Added NX_TUI=false to ~/.bashrc"
-fi
-
-# Alias vim to nvim
-if ! grep -qF "alias vim=" "$HOME/.bashrc"; then
-  echo '' >> "$HOME/.bashrc"
-  echo '# Use Neovim as vim' >> "$HOME/.bashrc"
-  echo 'alias vim=nvim' >> "$HOME/.bashrc"
-  echo "Added vim=nvim alias to ~/.bashrc"
-fi
-
-# pbcopy alias (OSC 52 clipboard, works over SSH + tmux)
-if ! grep -qF "alias pbcopy=" "$HOME/.bashrc"; then
-  echo '' >> "$HOME/.bashrc"
-  echo '# pbcopy via OSC 52 (works over SSH + tmux)' >> "$HOME/.bashrc"
-  echo 'alias pbcopy='\''printf "\033]52;c;%s\a" "$(base64)"'\''' >> "$HOME/.bashrc"
-  echo "Added pbcopy alias to ~/.bashrc"
 fi
 
 # Symlink db-worktree CLI to ~/.local/bin

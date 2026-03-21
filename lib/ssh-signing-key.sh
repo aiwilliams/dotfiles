@@ -2,7 +2,8 @@
 # ssh-signing-key.sh — Resolve which SSH key to use for git commit signing.
 #
 # Sets:
-#   SSH_SIGNING_KEY           — path to private key (empty string on failure)
+#   SSH_SIGNING_KEY           — path to private key, or raw public key string
+#                               for agent-based signing (e.g. 1Password)
 #   SSH_SIGNING_KEY_ON_GITHUB — "true" or "false"
 #
 # Returns 0 on success, 1 if no key could be resolved.
@@ -15,6 +16,17 @@ resolve_signing_key() {
   local configured
   configured="$(git config --global user.signingkey 2>/dev/null || true)"
   if [ -n "$configured" ]; then
+    # 1Password (or other SSH agent-based signing): gpg.ssh.program is set and
+    # signingkey is a raw public key string (starts with "ssh-" or "ecdsa-"),
+    # not a file path. Accept the existing configuration as-is.
+    local ssh_program
+    ssh_program="$(git config --global gpg.ssh.program 2>/dev/null || true)"
+    if [ -n "$ssh_program" ] && [[ "$configured" == ssh-* || "$configured" == ecdsa-* ]]; then
+      SSH_SIGNING_KEY="$configured"
+      _check_key_on_github_by_data "$configured"
+      return 0
+    fi
+
     # signingkey points to .pub; derive private key path
     local private_key="${configured%.pub}"
     if [ -f "$private_key" ]; then
@@ -123,6 +135,17 @@ _check_key_on_github() {
 
   [ -f "$private_key.pub" ] || return 0
 
+  local key_data
+  key_data=$(awk '{print $2}' "$private_key.pub")
+  _check_key_on_github_by_data "ssh-ed25519 $key_data"
+}
+
+# Check whether a raw public key string is registered on GitHub.
+# $1 = full public key string (e.g. "ssh-ed25519 AAAA...")
+_check_key_on_github_by_data() {
+  local pubkey_string="$1"
+  SSH_SIGNING_KEY_ON_GITHUB="false"
+
   if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
     local gh_login
     gh_login=$(gh auth status 2>&1 | grep "account" | head -1 | sed 's/.*account //' | awk '{print $1}')
@@ -130,7 +153,7 @@ _check_key_on_github() {
     signing_keys=$(gh api "users/$gh_login/ssh_signing_keys" --jq '.[].key' 2>/dev/null || true)
     if [ -n "$signing_keys" ]; then
       local key_data
-      key_data=$(awk '{print $2}' "$private_key.pub")
+      key_data=$(echo "$pubkey_string" | awk '{print $2}')
       if echo "$signing_keys" | grep -qF "$key_data"; then
         export SSH_SIGNING_KEY_ON_GITHUB="true"
       fi
