@@ -1567,7 +1567,7 @@ cmd_ngrok() {
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --help|-h)
-        cat <<'HELP'
+        cat <<HELP
 Usage: wt ngrok [--host <host>] [N|wtN|off]
 
 Tunnel a worktree's port via ngrok for external webhook access.
@@ -1579,6 +1579,8 @@ to route webhooks to a dev VM, centralizing all inbound routing.
 
 Requires NGROK_DOMAIN in your environment (e.g. via ~/.zshrc.local):
   export NGROK_DOMAIN="your-domain.ngrok-free.app"
+
+NGROK_DOMAIN: ${NGROK_DOMAIN:-(not set)}
 
 Examples:
   wt ngrok 1                      # local: tunnel to wt1 (port 3001)
