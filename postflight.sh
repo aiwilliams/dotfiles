@@ -27,9 +27,23 @@ section "SSH Key"
 
 if resolve_signing_key; then
   SSH_KEY="$SSH_SIGNING_KEY"
-  pass "Key found: $SSH_KEY"
+
+  # Detect agent-based signing (e.g. 1Password)
+  SSH_PROGRAM="$(git config --global gpg.ssh.program 2>/dev/null || true)"
+  if [ -n "$SSH_PROGRAM" ] && [[ "$SSH_KEY" == ssh-* || "$SSH_KEY" == ecdsa-* ]]; then
+    AGENT_SIGNING=true
+    PUBKEY="$SSH_KEY"
+    pass "Key found: agent-based (${SSH_PROGRAM##*/})"
+  else
+    AGENT_SIGNING=false
+    PUBKEY=""
+    [ -f "$SSH_KEY.pub" ] && PUBKEY="$(cat "$SSH_KEY.pub")"
+    pass "Key found: $SSH_KEY"
+  fi
 else
   SSH_KEY=""
+  AGENT_SIGNING=false
+  PUBKEY=""
   fail "No SSH key found" \
     "ssh-keygen -t ed25519 -f \"$HOME/.ssh/id_ed25519\" -C \"$(whoami)@$(hostname)\""
 fi
@@ -46,7 +60,9 @@ else
 fi
 
 CONFIGURED_KEY="$(git config --global user.signingkey 2>/dev/null || true)"
-if [ -n "$SSH_KEY" ] && [ "$CONFIGURED_KEY" = "$SSH_KEY.pub" ]; then
+if [ "$AGENT_SIGNING" = "true" ] && [ -n "$CONFIGURED_KEY" ]; then
+  pass "user.signingkey configured (via ${SSH_PROGRAM##*/})"
+elif [ -n "$SSH_KEY" ] && [ "$CONFIGURED_KEY" = "$SSH_KEY.pub" ]; then
   pass "user.signingkey = $SSH_KEY.pub"
 elif [ -n "$CONFIGURED_KEY" ] && [ -f "${CONFIGURED_KEY%.pub}" ]; then
   pass "user.signingkey = $CONFIGURED_KEY"
@@ -77,8 +93,8 @@ fi
 ALLOWED_SIGNERS="$HOME/.ssh/allowed_signers"
 CONFIGURED_SIGNERS="$(git config --global gpg.ssh.allowedSignersFile 2>/dev/null || true)"
 if [ "$CONFIGURED_SIGNERS" = "$ALLOWED_SIGNERS" ] && [ -f "$ALLOWED_SIGNERS" ]; then
-  if [ -n "$SSH_KEY" ] && [ -f "$SSH_KEY.pub" ]; then
-    LOCAL_KEY_DATA=$(awk '{print $2}' "$SSH_KEY.pub")
+  if [ -n "$PUBKEY" ]; then
+    LOCAL_KEY_DATA=$(echo "$PUBKEY" | awk '{print $2}')
     if grep -qF "$LOCAL_KEY_DATA" "$ALLOWED_SIGNERS"; then
       pass "allowedSignersFile configured with current key"
     else
@@ -117,17 +133,22 @@ fi
 
 section "GitHub SSH Keys"
 
-if [ -z "$SSH_KEY" ] || ! [ -f "$SSH_KEY.pub" ]; then
-  warn "Skipping — no local SSH key to check"
+if [ -z "$SSH_KEY" ]; then
+  warn "Skipping — no SSH key to check"
 else
   # Check authentication key: ssh to github.com returns exit 1 with a greeting on success
-  SSH_OUTPUT=$(ssh -T -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new git@github.com 2>&1 || true) # gitleaks:allow
+  if [ "$AGENT_SIGNING" = "true" ]; then
+    # Agent handles key selection; don't pass -i
+    SSH_OUTPUT=$(ssh -T -o StrictHostKeyChecking=accept-new git@github.com 2>&1 || true) # gitleaks:allow
+  else
+    SSH_OUTPUT=$(ssh -T -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new git@github.com 2>&1 || true) # gitleaks:allow
+  fi
   if echo "$SSH_OUTPUT" | grep -qi "successfully authenticated"; then
     pass "Authentication key on GitHub"
   else
     manual "Authentication key not on GitHub" \
-      "Add as Authentication Key at https://github.com/settings/ssh/new
-        $(cat "$SSH_KEY.pub")"
+      "Add as Authentication Key at https://github.com/settings/ssh/new${PUBKEY:+
+        $PUBKEY}"
   fi
 
   # Check signing key using the result from resolve_signing_key
@@ -135,8 +156,8 @@ else
     pass "Signing key on GitHub"
   else
     manual "Signing key not on GitHub" \
-      "Add as Signing Key at https://github.com/settings/ssh/new
-        $(cat "$SSH_KEY.pub")"
+      "Add as Signing Key at https://github.com/settings/ssh/new${PUBKEY:+
+        $PUBKEY}"
   fi
 fi
 
