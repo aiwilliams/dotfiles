@@ -1110,6 +1110,29 @@ cmd_proxy() {
   # Parse flags
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
+      --help|-h)
+        cat <<'HELP'
+Usage: wt proxy [--host <host>] [--domain <domain>] [N|wtN|off]
+
+Route the HTTPS proxy to a worktree's port via Caddy.
+
+Local mode (default): moves PROXY_DOMAIN between worktree .env files
+so only one worktree at a time has it. Domain is read from .env.
+
+Remote mode (--host): Caddy-only, no .env management. Use this from
+a Mac to route to a dev VM. Reads domain from .env if available, or
+use --domain to specify it explicitly.
+
+Examples:
+  wt proxy 6                          # local: route to wt6
+  wt proxy main                       # local: route to main
+  wt proxy off                        # stop proxy
+  wt proxy                            # show current routing
+  wt proxy --host fw 6                # remote: route to fw:3006
+  wt proxy --host fw --domain d.test 6  # remote: explicit domain
+HELP
+        return
+        ;;
       --host)
         upstream_host="${2:-}"
         if [[ -z "$upstream_host" ]]; then
@@ -1543,6 +1566,30 @@ cmd_ngrok() {
   # Parse flags
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
+      --help|-h)
+        cat <<'HELP'
+Usage: wt ngrok [--host <host>] [N|wtN|off]
+
+Tunnel a worktree's port via ngrok for external webhook access.
+
+Local mode (default): tunnels to localhost:<port>.
+
+Remote mode (--host): tunnels to <host>:<port>. Use this from a Mac
+to route webhooks to a dev VM, centralizing all inbound routing.
+
+Requires NGROK_DOMAIN in your environment (e.g. via ~/.zshrc.local):
+  export NGROK_DOMAIN="your-domain.ngrok-free.app"
+
+Examples:
+  wt ngrok 1                      # local: tunnel to wt1 (port 3001)
+  wt ngrok main                   # local: tunnel to main (port 3000)
+  wt ngrok off                    # stop ngrok
+  wt ngrok                        # show current tunnel status
+  wt ngrok log                    # tail the ngrok log
+  wt ngrok --host fw 6            # remote: tunnel to fw:3006
+HELP
+        return
+        ;;
       --host)
         upstream_host="${2:-}"
         if [[ -z "$upstream_host" ]]; then
