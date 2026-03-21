@@ -187,7 +187,7 @@ compute_port() {
 # Update POSTGRES_*, PORT, NEXT_PUBLIC_HOST, and NEXT_PUBLIC_SITE_URL in a .env file.
 # Delegates POSTGRES_* handling to pg_apply_env, then layers on PORT, host, and site URL.
 #
-# If PROXY_DOMAIN is set in the env file (e.g. opine.test), NEXT_PUBLIC_SITE_URL
+# If PROXY_DOMAIN is set in the env file (e.g. opine.localhost), NEXT_PUBLIC_SITE_URL
 # and NEXT_PUBLIC_HOST use the proxy domain instead of hostname:port. PORT is still
 # set per-worktree (needed for Inngest port mapping and the dev server).
 write_env_vars() {
@@ -276,7 +276,7 @@ Commands:
   switch [N|wtN|main]            Switch to worktree (interactive fzf picker if no arg)
   env-sync                       Copy main .env to all worktrees, preserving wt-specific vars
   proxy [options] [N|wtN|off]    Route HTTPS proxy to a worktree (show current if no arg)
-  ngrok [N|wtN|off]              Tunnel a worktree's port via ngrok (show status if no arg)
+  ngrok [options] [N|wtN|off]    Tunnel a worktree's port via ngrok (show status if no arg)
   merged                         Show worktrees whose branch PR has been merged
   db-backup [label]              Backup current worktree's databases (optional label)
   db-restore [timestamp]         Restore databases from a backup (fzf picker if no arg)
@@ -389,19 +389,25 @@ COMMANDS
       wt proxy --host fw 6                # remote: route to fw:3006
       wt proxy --host fw --domain d.test 6  # remote: explicit domain
 
-  wt ngrok [N|wtN|off]
+  wt ngrok [--host <host>] [N|wtN|off]
 
     Tunnel a worktree's port via ngrok for external webhook access.
+
+    Local mode (default): tunnels to localhost:<port>.
+
+    Remote mode (--host): tunnels to <host>:<port>. Use this from a Mac
+    to route webhooks to a dev VM, centralizing all inbound routing.
 
     Requires NGROK_DOMAIN in your environment (e.g. via ~/.zshrc.local):
       export NGROK_DOMAIN="your-domain.ngrok-free.app"
 
     Examples:
-      wt ngrok 1                      # tunnel to wt1 (port 3001)
-      wt ngrok main                   # tunnel to main (port 3000)
+      wt ngrok 1                      # local: tunnel to wt1 (port 3001)
+      wt ngrok main                   # local: tunnel to main (port 3000)
       wt ngrok off                    # stop ngrok
       wt ngrok                        # show current tunnel status
       wt ngrok log                    # tail the ngrok log
+      wt ngrok --host fw 6            # remote: tunnel to fw:3006
 
   wt help
 
@@ -1532,6 +1538,26 @@ cmd_db_restore() {
 }
 
 cmd_ngrok() {
+  local upstream_host="localhost"
+
+  # Parse flags
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --host)
+        upstream_host="${2:-}"
+        if [[ -z "$upstream_host" ]]; then
+          echo -e "${RED}--host requires a value${NC}" >&2
+          exit 1
+        fi
+        shift 2
+        ;;
+      *)
+        echo -e "${RED}Unknown option: $1${NC}" >&2
+        exit 1
+        ;;
+    esac
+  done
+
   local target="${1:-}"
 
   # No argument: show status
@@ -1571,11 +1597,11 @@ cmd_ngrok() {
   local target_port
   target_port=$(proxy_target_to_port "$target")
 
-  ngrok_start "$target_port"
+  ngrok_start "$upstream_host" "$target_port"
 
   local domain
   domain=$(ngrok_domain)
-  echo -e "${GREEN}https://${domain}${NC} → localhost:${target_port}"
+  echo -e "${GREEN}https://${domain}${NC} → ${upstream_host}:${target_port}"
 }
 
 # --- Main dispatch ---

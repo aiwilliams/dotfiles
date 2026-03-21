@@ -37,10 +37,12 @@ ngrok_is_running() {
   return 1
 }
 
-# Start ngrok tunneling to a given port.
-# $1 = upstream port (e.g. 3001)
+# Start ngrok tunneling to a given host:port.
+# $1 = upstream host (e.g. localhost, fw)
+# $2 = upstream port (e.g. 3001)
 ngrok_start() {
-  local port="$1"
+  local upstream_host="$1"
+  local port="$2"
   local domain
   domain=$(ngrok_domain)
 
@@ -66,7 +68,7 @@ ngrok_start() {
     --url "https://${domain}" \
     --log "$NGROK_LOGFILE" \
     --log-format json \
-    "https://localhost:${port}" \
+    "https://${upstream_host}:${port}" \
     > /dev/null 2>&1 &
 
   echo $! > "$NGROK_PIDFILE"

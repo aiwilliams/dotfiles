@@ -16,7 +16,7 @@ caddy_check() {
 }
 
 # Check if certs exist for a given domain.
-# $1 = domain (e.g. opine.test)
+# $1 = domain (e.g. opine.localhost)
 caddy_certs_exist() {
   local domain="${1:-}"
   if [[ -n "$domain" ]]; then
@@ -32,7 +32,7 @@ caddy_certs_exist() {
 # --------------------------------------------------------------------------
 
 # Write a Caddyfile that routes $domain:$listen_port to $upstream_host:$upstream_port.
-# $1 = domain (e.g. opine.test)
+# $1 = domain (e.g. opine.localhost)
 # $2 = listen port (e.g. 5443)
 # $3 = upstream host (e.g. localhost or fw)
 # $4 = upstream port (e.g. 3001)
