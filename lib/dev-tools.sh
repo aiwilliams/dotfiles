@@ -20,7 +20,7 @@ fi
 # Codex
 if ! command -v codex &>/dev/null; then
   echo "Installing Codex..."
-  npm install -g @openai/codex@latest
+  pnpm add -g @openai/codex@latest
 else
   echo "Codex already installed, skipping."
 fi
@@ -28,7 +28,7 @@ fi
 # Graphite (stacked PRs)
 if ! command -v gt &>/dev/null; then
   echo "Installing Graphite..."
-  npm install -g @withgraphite/graphite-cli@stable
+  pnpm add -g @withgraphite/graphite-cli@stable
 else
   echo "Graphite already installed, skipping."
 fi
