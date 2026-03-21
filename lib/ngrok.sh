@@ -3,7 +3,7 @@
 # Sourced by bin/wt and other scripts that manage ngrok tunnels.
 #
 # Expects NGROK_DOMAIN to be set in the environment (e.g. via ~/.zshenv.local):
-#   export NGROK_DOMAIN="concrete-crayfish-friendly.ngrok-free.app"
+#   export NGROK_DOMAIN="your-domain.ngrok-free.app"
 
 NGROK_DATA_DIR="${HOME}/.local/share/dev-proxy/ngrok"
 NGROK_PIDFILE="${NGROK_DATA_DIR}/ngrok.pid"
