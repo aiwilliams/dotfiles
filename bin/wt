@@ -398,7 +398,7 @@ COMMANDS
     Remote mode (--host): tunnels to <host>:<port>. Use this from a Mac
     to route webhooks to a dev VM, centralizing all inbound routing.
 
-    Requires NGROK_DOMAIN in your environment (e.g. via ~/.zshrc.local):
+    Requires NGROK_DOMAIN in your environment (e.g. via ~/.zshenv.local):
       export NGROK_DOMAIN="your-domain.ngrok-free.app"
 
     Examples:
@@ -1577,7 +1577,7 @@ Local mode (default): tunnels to localhost:<port>.
 Remote mode (--host): tunnels to <host>:<port>. Use this from a Mac
 to route webhooks to a dev VM, centralizing all inbound routing.
 
-Requires NGROK_DOMAIN in your environment (e.g. via ~/.zshrc.local):
+Requires NGROK_DOMAIN in your environment (e.g. via ~/.zshenv.local):
   export NGROK_DOMAIN="your-domain.ngrok-free.app"
 
 NGROK_DOMAIN: ${NGROK_DOMAIN:-(not set)}

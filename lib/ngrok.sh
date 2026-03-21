@@ -2,7 +2,7 @@
 # ngrok.sh — Shared ngrok tunnel library.
 # Sourced by bin/wt and other scripts that manage ngrok tunnels.
 #
-# Expects NGROK_DOMAIN to be set in the environment (e.g. via ~/.zshrc.local):
+# Expects NGROK_DOMAIN to be set in the environment (e.g. via ~/.zshenv.local):
 #   export NGROK_DOMAIN="concrete-crayfish-friendly.ngrok-free.app"
 
 NGROK_DATA_DIR="${HOME}/.local/share/dev-proxy/ngrok"
@@ -54,7 +54,7 @@ ngrok_start() {
 
   if [[ -z "$domain" ]]; then
     echo "NGROK_DOMAIN is not set." >&2
-    echo "Add to ~/.zshrc.local:  export NGROK_DOMAIN=\"your-domain.ngrok-free.app\"" >&2
+    echo "Add to ~/.zshenv.local:  export NGROK_DOMAIN=\"your-domain.ngrok-free.app\"" >&2
     return 1
   fi
 

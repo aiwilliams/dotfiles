@@ -11,3 +11,6 @@ export PATH="$HOME/.local/bin:$PATH"
 if [[ "$(uname -s)" == Linux ]] && (( $(</proc/self/oom_score_adj) < 0 )) 2>/dev/null; then
   echo 0 > /proc/self/oom_score_adj
 fi
+
+# Machine-local overrides (secrets, NGROK_DOMAIN, etc.) — not checked into git.
+[[ -f ~/.zshenv.local ]] && source ~/.zshenv.local

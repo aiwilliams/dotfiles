@@ -92,10 +92,11 @@ ln -sf "$SCRIPT_DIR/config/tmux/tmux.conf" "$HOME/.config/tmux/tmux.conf"
 echo "Symlinked tmux.conf to ~/.config/tmux/"
 
 # Zsh config
+ln -sf "$SCRIPT_DIR/config/zsh/.zshenv" "$HOME/.zshenv"
 ln -sf "$SCRIPT_DIR/config/zsh/.zshrc" "$HOME/.zshrc"
 ln -sf "$SCRIPT_DIR/config/zsh/.p10k.zsh" "$HOME/.p10k.zsh"
 ln -sfn "$SCRIPT_DIR/config/zsh/plugins/zmx" "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zmx"
-echo "Symlinked .zshrc, .p10k.zsh, and zmx plugin to ~/"
+echo "Symlinked .zshenv, .zshrc, .p10k.zsh, and zmx plugin to ~/"
 
 # Set zsh as default shell (macOS already uses zsh)
 if [ "$(uname -s)" = "Linux" ]; then
