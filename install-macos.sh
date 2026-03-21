@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/brew.sh"
+
 echo "Running macOS setup..."
 
 # --- Homebrew ---
@@ -14,13 +17,13 @@ else
   brew update
 fi
 
-brew install tmux gh fzf shellcheck yq gitleaks mkcert caddy
-brew install --cask ngrok
+brew_install tmux gh fzf shellcheck yq gitleaks mkcert caddy
+brew_install_cask ngrok
 
 # --- Docker via Colima ---
 
 echo "Installing Colima + Docker CLI..."
-brew install colima docker docker-compose
+brew_install colima docker docker-compose
 if ! colima status &>/dev/null 2>&1; then
   colima start
 fi
@@ -29,7 +32,7 @@ fi
 
 echo "Installing PostgreSQL 18 + pgvector..."
 
-brew install postgresql@18 pgvector
+brew_install postgresql@18 pgvector
 brew services start postgresql@18
 
 echo "Waiting for PostgreSQL to start..."
@@ -46,6 +49,5 @@ psql -U postgres -c "ALTER USER postgres PASSWORD 'postgres';" 2>/dev/null || \
   psql -U postgres -c "ALTER USER postgres PASSWORD 'postgres';"
 
 # Create main worktree databases
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/postgres.sh"
 pg_create_worktree_dbs "main"

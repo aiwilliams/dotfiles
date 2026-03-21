@@ -4,6 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SCRIPT_DIR/lib/brew.sh"
 NVIM_VERSION="0.11.2"
 
 echo "Setting up Neovim (LazyVim)..."
@@ -30,7 +31,7 @@ if [ "$CURRENT_NVIM_VERSION" != "$NVIM_VERSION" ]; then
       sudo ln -sf /opt/nvim-linux-${NVIM_ARCH}/bin/nvim /usr/local/bin/nvim
       ;;
     Darwin)
-      brew install neovim
+      brew_install neovim
       ;;
   esac
 fi
@@ -69,8 +70,8 @@ case "$(uname -s)" in
     ;;
 
   Darwin)
-    brew install ripgrep fd lazygit
-    brew install --cask font-jetbrains-mono-nerd-font
+    brew_install ripgrep fd lazygit
+    brew_install_cask font-jetbrains-mono-nerd-font
     ;;
 esac
 
