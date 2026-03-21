@@ -86,7 +86,7 @@ ngrok_stop() {
 # Print current tunnel status by querying ngrok's local API.
 ngrok_status() {
   if ! ngrok_is_running; then
-    echo "stopped"
+    echo "stopped (${NGROK_DOMAIN:-(NGROK_DOMAIN not set)})"
     return
   fi
 
