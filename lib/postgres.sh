@@ -332,7 +332,7 @@ pg_apply_env() {
     tmp=$(mktemp)
     grep -v '^POSTGRES_' "$env_file" > "$tmp" || true
     # Remove trailing blank lines
-    sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
+    printf '%s\n' "$(<"$tmp")" > "$tmp"
     echo "" >> "$tmp"
     echo "$env_vars" >> "$tmp"
     mv "$tmp" "$env_file"

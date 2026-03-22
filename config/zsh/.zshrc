@@ -28,7 +28,7 @@ wt() {
       dir=$(command wt "$@") || return
       [[ -n "$dir" ]] && cd "$dir"
       ;;
-    create)
+    create|checkout)
       rm -f /tmp/wt_cd_path
       command wt "$@" || return
       [[ -f /tmp/wt_cd_path ]] && cd "$(</tmp/wt_cd_path)" && rm -f /tmp/wt_cd_path
