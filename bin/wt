@@ -1691,9 +1691,27 @@ HELP
 
 # --- Process status ---
 
-# Print formatted process info line
-_ps_proc_line() {
-  local label="$1" pid="$2"
+# Abbreviate a path: ~ for $HOME, single-char intermediate segments
+_ps_abbrev_path() {
+  local dir="$1"
+  if [[ "$dir" == "$HOME"* ]]; then
+    dir="~${dir#"$HOME"}"
+  fi
+  local IFS_save="$IFS"
+  IFS='/' read -ra parts <<< "$dir"
+  IFS="$IFS_save"
+  local n=${#parts[@]}
+  local result="${parts[0]}"
+  for (( j=1; j<n-1; j++ )); do
+    result+="/${parts[$j]:0:1}"
+  done
+  (( n > 1 )) && result+="/${parts[$n-1]}"
+  echo "$result"
+}
+
+# Return "mem uptime" summary for a process tree, or empty if pid gone
+_ps_proc_summary() {
+  local pid="$1"
   local rss _pct etime
   read -r rss _pct etime < <(ps -o rss=,%mem=,etime= -p "$pid" --no-headers 2>/dev/null) || return
 
@@ -1705,14 +1723,14 @@ _ps_proc_line() {
     total_rss=$((total_rss + child_rss))
   done < <(pgrep -P "$pid" 2>/dev/null)
 
-  local mem_display
+  local mem
   if (( total_rss >= 1048576 )); then
-    mem_display=$(awk "BEGIN{printf \"%.1fG\", $total_rss/1048576}")
+    mem=$(awk "BEGIN{printf \"%.1fG\", $total_rss/1048576}")
   else
-    mem_display=$(awk "BEGIN{printf \"%.0fM\", $total_rss/1024}")
+    mem=$(awk "BEGIN{printf \"%.0fM\", $total_rss/1024}")
   fi
 
-  printf "  %-14s pid %-8s  mem %-8s  uptime %s\n" "$label" "$pid" "$mem_display" "$etime"
+  echo "${mem} ${etime}"
 }
 
 # Find a next-server process whose cwd is within the given directory
@@ -1732,12 +1750,11 @@ _ps_find_next_server() {
 }
 
 # Find an inngest dev process belonging to the given worktree directory.
-# Walks up from leaf `inngest dev` processes to find one whose ancestor
-# (the pnpm or nx process) has a cwd within the worktree.
+# Locates the pnpm dev:inngest process by cwd, then walks to the leaf
+# inngest binary for accurate resource measurement.
 _ps_find_inngest() {
   local wt_dir="$1"
   local pids pid cwd
-  # Look for the top-level pnpm dev:inngest process by cwd
   pids=$(pgrep -f 'pnpm dev:inngest' 2>/dev/null || true)
   [[ -z "$pids" ]] && return
   while IFS= read -r pid; do
@@ -1758,116 +1775,6 @@ _ps_find_inngest() {
   done <<< "$pids"
 }
 
-# Extract the inngest dev port from a process's command line
-_ps_inngest_port() {
-  local pid="$1"
-  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -oP '(?<=-p )\d+' | head -1 || true
-}
-
-# Abbreviate a path: ~ for $HOME, single-char intermediate segments
-_ps_abbrev_path() {
-  local dir="$1"
-  if [[ "$dir" == "$HOME"* ]]; then
-    dir="~${dir#"$HOME"}"
-  fi
-  local IFS_save="$IFS"
-  IFS='/' read -ra parts <<< "$dir"
-  IFS="$IFS_save"
-  local n=${#parts[@]}
-  local result="${parts[0]}"
-  for (( j=1; j<n-1; j++ )); do
-    result+="/${parts[$j]:0:1}"
-  done
-  (( n > 1 )) && result+="/${parts[$n-1]}"
-  echo "$result"
-}
-
-# Detect which port proxy (Caddy) and ngrok are targeting.
-# Sets _proxy_port and _ngrok_port globals.
-_ps_detect_routing() {
-  _proxy_port=""
-  _ngrok_port=""
-
-  # Proxy: parse upstream port from Caddyfile
-  if caddy_is_running && [[ -f "$CADDYFILE" ]]; then
-    _proxy_port=$(grep -oP 'reverse_proxy \S+:(\K\d+)' "$CADDYFILE" 2>/dev/null || true)
-  fi
-
-  # Ngrok: parse backend port from API
-  if ngrok_is_running; then
-    local response
-    response=$(curl -s "$NGROK_API/tunnels" 2>/dev/null) || true
-    if [[ -n "$response" ]]; then
-      _ngrok_port=$(echo "$response" | grep -oP '"addr"\s*:\s*"[^:]+:\K\d+' | head -1 || true)
-    fi
-  fi
-}
-
-# Report processes for a single worktree
-_ps_report_worktree() {
-  local wt_dir="$1" wt_id="$2" port="$3"
-  local found=false
-
-  # next-server
-  local next_pid
-  next_pid=$(_ps_find_next_server "$wt_dir")
-  if [[ -n "$next_pid" ]]; then
-    found=true
-    _ps_proc_line "next-server" "$next_pid"
-  fi
-
-  # inngest
-  local inngest_pid inngest_port
-  inngest_pid=$(_ps_find_inngest "$wt_dir")
-  if [[ -n "$inngest_pid" ]]; then
-    found=true
-    inngest_port=$(_ps_inngest_port "$inngest_pid")
-    local label="inngest"
-    [[ -n "$inngest_port" ]] && label="inngest:${inngest_port}"
-    _ps_proc_line "$label" "$inngest_pid"
-  fi
-
-  # postgres databases
-  local sanitized
-  if [[ "$wt_id" == "main" ]]; then
-    sanitized="main"
-  else
-    sanitized="$wt_id"
-  fi
-  local db_exists=false db_names=() db_conns=0
-  for prefix in "${DB_PREFIXES[@]}"; do
-    local dbname="${prefix}_${sanitized}"
-    if pg_db_exists "$dbname" 2>/dev/null; then
-      db_exists=true
-      db_names+=("$dbname")
-      local conns
-      conns=$(pg_exec "SELECT count(*) FROM pg_stat_activity WHERE datname = '$dbname';" 2>/dev/null) || conns=0
-      db_conns=$((db_conns + conns))
-    fi
-  done
-  if $db_exists; then
-    found=true
-    printf "  %-14s %s  (%d connections)\n" "postgres" "${db_names[*]}" "$db_conns"
-  fi
-
-  # Routing indicators
-  local routing=""
-  if [[ "$_proxy_port" == "$port" ]]; then
-    routing+=" proxy"
-  fi
-  if [[ "$_ngrok_port" == "$port" ]]; then
-    routing+=" ngrok"
-  fi
-  if [[ -n "$routing" ]]; then
-    found=true
-    printf "  ${GREEN}routing:%s${NC}\n" "$routing"
-  fi
-
-  if ! $found; then
-    printf "  ${YELLOW}no processes found${NC}\n"
-  fi
-}
-
 cmd_ps() {
   local show_all=false
   if [[ "${1:-}" == "--all" || "${1:-}" == "-a" ]]; then
@@ -1878,14 +1785,24 @@ cmd_ps() {
   main_dir=$(main_worktree_dir)
   repo=$(repo_name)
 
-  # Detect proxy/ngrok targets once
-  _ps_detect_routing
+  # Detect proxy/ngrok target ports once
+  local proxy_port="" ngrok_port=""
+  if caddy_is_running && [[ -f "$CADDYFILE" ]]; then
+    proxy_port=$(grep -oP 'reverse_proxy \S+:(\K\d+)' "$CADDYFILE" 2>/dev/null || true)
+  fi
+  if ngrok_is_running; then
+    local response
+    response=$(curl -s "$NGROK_API/tunnels" 2>/dev/null) || true
+    if [[ -n "$response" ]]; then
+      ngrok_port=$(echo "$response" | grep -oP '"addr"\s*:\s*"[^:]+:\K\d+' | head -1 || true)
+    fi
+  fi
+
+  # Build list of worktrees to report on
+  local -a wt_paths=() wt_ids=() wt_ports=()
 
   if $show_all; then
-    # Iterate all worktrees
-    local -a wt_paths=() wt_ids=() wt_ports=()
     local cur_wt=""
-
     while IFS= read -r line; do
       case "$line" in
         worktree\ *) cur_wt="${line#worktree }" ;;
@@ -1908,19 +1825,10 @@ cmd_ps() {
           ;;
       esac
     done < <(git worktree list --porcelain; echo "")
-
-    for i in "${!wt_paths[@]}"; do
-      local display_dir
-      display_dir=$(_ps_abbrev_path "${wt_paths[$i]}")
-      printf "${BOLD}── %s${NC}  port %s\n" "$display_dir" "${wt_ports[$i]}"
-      _ps_report_worktree "${wt_paths[$i]}" "${wt_ids[$i]}" "${wt_ports[$i]}"
-    done
   else
-    # Current worktree only
-    local wt_id wt_dir port display_dir
+    local wt_id wt_dir port
     wt_id=$(current_worktree_id)
     wt_dir=$(git rev-parse --show-toplevel)
-
     if [[ "$wt_id" == "main" ]]; then
       port="3000"
     elif [[ "$wt_id" =~ ^wt([0-9]+)$ ]]; then
@@ -1928,11 +1836,71 @@ cmd_ps() {
     else
       port="?"
     fi
-
-    display_dir=$(_ps_abbrev_path "$wt_dir")
-    printf "${BOLD}── %s${NC}  port %s\n" "$display_dir" "$port"
-    _ps_report_worktree "$wt_dir" "$wt_id" "$port"
+    wt_paths+=("$wt_dir")
+    wt_ids+=("$wt_id")
+    wt_ports+=("$port")
   fi
+
+  # Collect rows
+  local output=""
+  output+="ID\tDIRECTORY\tPORT\tNEXT\tINNGEST\tPOSTGRES\tROUTING\n"
+
+  for i in "${!wt_paths[@]}"; do
+    local wt="${wt_paths[$i]}" id="${wt_ids[$i]}" port="${wt_ports[$i]}"
+    local display_dir next_info inngest_info db_conns routing
+
+    display_dir=$(_ps_abbrev_path "$wt")
+
+    # next-server
+    local next_pid
+    next_pid=$(_ps_find_next_server "$wt")
+    if [[ -n "$next_pid" ]]; then
+      next_info=$(_ps_proc_summary "$next_pid")
+    else
+      next_info="-"
+    fi
+
+    # inngest
+    local inngest_pid
+    inngest_pid=$(_ps_find_inngest "$wt")
+    if [[ -n "$inngest_pid" ]]; then
+      inngest_info=$(_ps_proc_summary "$inngest_pid")
+    else
+      inngest_info="-"
+    fi
+
+    # postgres connections
+    local sanitized="$id"
+    db_conns=0
+    local has_db=false
+    for prefix in "${DB_PREFIXES[@]}"; do
+      local dbname="${prefix}_${sanitized}"
+      if pg_db_exists "$dbname" 2>/dev/null; then
+        has_db=true
+        local conns
+        conns=$(pg_exec "SELECT count(*) FROM pg_stat_activity WHERE datname = '$dbname';" 2>/dev/null) || conns=0
+        db_conns=$((db_conns + conns))
+      fi
+    done
+    local db_display="-"
+    if $has_db; then
+      db_display="${db_conns} conn"
+    fi
+
+    # routing
+    routing=""
+    [[ "$proxy_port" == "$port" ]] && routing+="proxy "
+    [[ "$ngrok_port" == "$port" ]] && routing+="ngrok "
+    routing="${routing:--}"
+
+    output+="${id}\t${display_dir}\t${port}\t${next_info}\t${inngest_info}\t${db_display}\t${routing}\n"
+  done
+
+  printf "%b" "$output" | column -t -s $'\t' | {
+    IFS= read -r header
+    echo -e "${BOLD}${header}${NC}"
+    cat
+  }
 }
 
 # --- Main dispatch ---
