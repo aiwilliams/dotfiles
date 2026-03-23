@@ -461,9 +461,9 @@ DATABASE BACKUP & RESTORE
 EOF
 }
 
-# Fetch a remote branch into the main worktree, trying Graphite first then GitHub CLI.
-# Leaves main on its original branch afterward. Sets FETCH_BRANCH to the local branch
-# name that was checked out (gh pr checkout may rename).
+# Fetch a remote branch into the main worktree, trying Graphite first, then GitHub
+# CLI, then plain git fetch. Leaves main on its original branch afterward. Sets
+# FETCH_BRANCH to the local branch name that was checked out (gh pr checkout may rename).
 # $1 = branch name
 fetch_remote_branch() {
   local branch="$1"
@@ -471,27 +471,43 @@ fetch_remote_branch() {
   main_dir=$(main_worktree_dir)
   local original_branch
   original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
+  local err_file
+  err_file=$(mktemp)
+  # Expand $err_file now so the trap cleans up the right file
+  # shellcheck disable=SC2064
+  trap "rm -f '$err_file'" RETURN
 
   FETCH_BRANCH="$branch"
 
-  # Try Graphite first — gt get fetches the branch and its stack
+  # Try Graphite first — gt get fetches the branch and its entire stack
   if command -v gt &>/dev/null; then
     echo -e "${BOLD}Fetching branch via Graphite...${NC}"
-    if (cd "$main_dir" && gt get "$branch" --force 2>/dev/null); then
+    if (cd "$main_dir" && gt get "$branch" --force 2>"$err_file"); then
       (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
       return 0
     fi
-    echo -e "${YELLOW}Not a Graphite branch, trying GitHub CLI...${NC}"
+    echo -e "${YELLOW}Graphite failed: $(cat "$err_file")${NC}"
   fi
 
   # Fall back to gh pr checkout
   if command -v gh &>/dev/null; then
     echo -e "${BOLD}Fetching branch via GitHub CLI...${NC}"
-    if (cd "$main_dir" && gh pr checkout "$branch" --force 2>/dev/null); then
+    if (cd "$main_dir" && gh pr checkout "$branch" --force 2>"$err_file"); then
       FETCH_BRANCH=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
       (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
       return 0
     fi
+    echo -e "${YELLOW}GitHub CLI failed: $(cat "$err_file")${NC}"
+  fi
+
+  # Last resort: plain git fetch
+  echo -e "${BOLD}Fetching branch via git...${NC}"
+  if git -C "$main_dir" fetch origin "$branch" 2>/dev/null; then
+    if git -C "$main_dir" branch --list "$branch" | grep -q .; then
+      # Local branch exists — update it to match remote
+      git -C "$main_dir" branch -f "$branch" "origin/$branch" 2>/dev/null
+    fi
+    return 0
   fi
 
   return 1
