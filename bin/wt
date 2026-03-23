@@ -479,11 +479,12 @@ fetch_remote_branch() {
 
   FETCH_BRANCH="$branch"
 
-  # Try Graphite first — gt get fetches the branch and its entire stack
+  # Try Graphite first — gt get fetches the branch and its entire stack.
+  # Use --no-checkout so gt doesn't try to switch branches in the main worktree
+  # (which fails if there are uncommitted changes).
   if command -v gt &>/dev/null; then
     echo -e "${BOLD}Fetching branch via Graphite...${NC}"
-    if (cd "$main_dir" && gt get "$branch" --force 2>"$err_file"); then
-      (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
+    if (cd "$main_dir" && gt get "$branch" --force --no-checkout 2>"$err_file"); then
       return 0
     fi
     echo -e "${YELLOW}Graphite failed: $(cat "$err_file")${NC}"
