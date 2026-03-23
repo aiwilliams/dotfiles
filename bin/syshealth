@@ -5,6 +5,7 @@
 #   syshealth            Full status report
 #   syshealth watch      Loop every 60s, only print + bell on problems
 #   syshealth watch 30   Loop every 30s
+#   (Use `wt ps` for next-server / inngest / database process info)
 
 set -euo pipefail
 

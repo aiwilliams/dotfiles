@@ -17,6 +17,7 @@
 #   wt env-sync                         Copy main .env to all worktrees
 #   wt proxy [options] [N|off]           Route HTTPS proxy to a worktree
 #   wt ngrok [N|wtN|off]                Tunnel a worktree's port via ngrok
+#   wt ps [--all]                       Show running processes for current worktree
 #   wt db-backup [label]                Backup current worktree's databases
 #   wt db-restore [timestamp]           Restore databases from a backup
 
@@ -413,6 +414,16 @@ COMMANDS
       wt ngrok                        # show current tunnel status
       wt ngrok log                    # tail the ngrok log
       wt ngrok --host fw 6            # remote: tunnel to fw:3006
+
+  wt ps [--all|-a]
+
+    Show running processes for the current worktree: next-server, inngest,
+    and PostgreSQL databases with connection counts. Use --all to show all
+    worktrees.
+
+    Examples:
+      wt ps              # current worktree
+      wt ps --all        # all worktrees
 
   wt help
 
@@ -1678,6 +1689,196 @@ HELP
   echo -e "${GREEN}https://${domain}${NC} → ${upstream_host}:${target_port}"
 }
 
+# --- Process status ---
+
+# Print formatted process info line
+_ps_proc_line() {
+  local label="$1" pid="$2"
+  local rss _pct etime
+  read -r rss _pct etime < <(ps -o rss=,%mem=,etime= -p "$pid" --no-headers 2>/dev/null) || return
+
+  # Total RSS including children
+  local total_rss=$rss child_rss cpid
+  while IFS= read -r cpid; do
+    [[ -z "$cpid" ]] && continue
+    child_rss=$(ps -o rss= -p "$cpid" --no-headers 2>/dev/null) || continue
+    total_rss=$((total_rss + child_rss))
+  done < <(pgrep -P "$pid" 2>/dev/null)
+
+  local mem_display
+  if (( total_rss >= 1048576 )); then
+    mem_display=$(awk "BEGIN{printf \"%.1fG\", $total_rss/1048576}")
+  else
+    mem_display=$(awk "BEGIN{printf \"%.0fM\", $total_rss/1024}")
+  fi
+
+  printf "  %-14s pid %-8s  mem %-8s  uptime %s\n" "$label" "$pid" "$mem_display" "$etime"
+}
+
+# Find a next-server process whose cwd is within the given directory
+_ps_find_next_server() {
+  local wt_dir="$1"
+  local pids pid cwd
+  pids=$(pgrep -f '^next-server ' 2>/dev/null || true)
+  [[ -z "$pids" ]] && return
+  while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
+    if [[ "$cwd" == "$wt_dir" || "$cwd" == "$wt_dir"/* ]]; then
+      echo "$pid"
+      return
+    fi
+  done <<< "$pids"
+}
+
+# Find an inngest dev process belonging to the given worktree directory.
+# Walks up from leaf `inngest dev` processes to find one whose ancestor
+# (the pnpm or nx process) has a cwd within the worktree.
+_ps_find_inngest() {
+  local wt_dir="$1"
+  local pids pid cwd
+  # Look for the top-level pnpm dev:inngest process by cwd
+  pids=$(pgrep -f 'pnpm dev:inngest' 2>/dev/null || true)
+  [[ -z "$pids" ]] && return
+  while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
+    if [[ "$cwd" == "$wt_dir" || "$cwd" == "$wt_dir"/* ]]; then
+      # Find the leaf inngest binary for accurate resource info
+      local leaf="$pid"
+      local children
+      while true; do
+        children=$(pgrep -P "$leaf" 2>/dev/null | head -1) || break
+        [[ -z "$children" ]] && break
+        leaf="$children"
+      done
+      echo "$leaf"
+      return
+    fi
+  done <<< "$pids"
+}
+
+# Extract the inngest dev port from a process's command line
+_ps_inngest_port() {
+  local pid="$1"
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -oP '(?<=-p )\d+' | head -1 || true
+}
+
+# Report processes for a single worktree
+_ps_report_worktree() {
+  local wt_dir="$1" wt_id="$2" port="$3"
+  local found=false
+
+  # next-server
+  local next_pid
+  next_pid=$(_ps_find_next_server "$wt_dir")
+  if [[ -n "$next_pid" ]]; then
+    found=true
+    _ps_proc_line "next-server" "$next_pid"
+  fi
+
+  # inngest
+  local inngest_pid inngest_port
+  inngest_pid=$(_ps_find_inngest "$wt_dir")
+  if [[ -n "$inngest_pid" ]]; then
+    found=true
+    inngest_port=$(_ps_inngest_port "$inngest_pid")
+    local label="inngest"
+    [[ -n "$inngest_port" ]] && label="inngest:${inngest_port}"
+    _ps_proc_line "$label" "$inngest_pid"
+  fi
+
+  # postgres databases
+  local sanitized
+  if [[ "$wt_id" == "main" ]]; then
+    sanitized="main"
+  else
+    sanitized="$wt_id"
+  fi
+  local db_exists=false db_names=() db_conns=0
+  for prefix in "${DB_PREFIXES[@]}"; do
+    local dbname="${prefix}_${sanitized}"
+    if pg_db_exists "$dbname" 2>/dev/null; then
+      db_exists=true
+      db_names+=("$dbname")
+      local conns
+      conns=$(pg_exec "SELECT count(*) FROM pg_stat_activity WHERE datname = '$dbname';" 2>/dev/null) || conns=0
+      db_conns=$((db_conns + conns))
+    fi
+  done
+  if $db_exists; then
+    found=true
+    printf "  %-14s %s  (%d connections)\n" "postgres" "${db_names[*]}" "$db_conns"
+  fi
+
+  if ! $found; then
+    printf "  ${YELLOW}no processes found${NC}\n"
+  fi
+}
+
+cmd_ps() {
+  local show_all=false
+  if [[ "${1:-}" == "--all" || "${1:-}" == "-a" ]]; then
+    show_all=true
+  fi
+
+  local main_dir repo
+  main_dir=$(main_worktree_dir)
+  repo=$(repo_name)
+
+  if $show_all; then
+    # Iterate all worktrees
+    local -a wt_paths=() wt_ids=() wt_ports=()
+    local cur_wt="" cur_branch=""
+
+    while IFS= read -r line; do
+      case "$line" in
+        worktree\ *) cur_wt="${line#worktree }" ;;
+        branch\ *)   cur_branch="${line#branch refs/heads/}" ;;
+        detached)    cur_branch="(detached)" ;;
+        "")
+          if [[ -n "$cur_wt" ]]; then
+            local dir_name id port
+            dir_name=$(basename "$cur_wt")
+            if [[ "$cur_wt" == "$main_dir" ]]; then
+              id="main"; port="3000"
+            elif [[ "$dir_name" =~ ^${repo}-wt([0-9]+)$ ]]; then
+              id="wt${BASH_REMATCH[1]}"; port=$((3000 + BASH_REMATCH[1]))
+            else
+              id="$dir_name"; port="?"
+            fi
+            wt_paths+=("$cur_wt")
+            wt_ids+=("$id")
+            wt_ports+=("$port")
+          fi
+          cur_wt="" cur_branch=""
+          ;;
+      esac
+    done < <(git worktree list --porcelain; echo "")
+
+    for i in "${!wt_paths[@]}"; do
+      printf "${BOLD}── %s${NC}  (port %s, %s)\n" "${wt_ids[$i]}" "${wt_ports[$i]}" "${wt_paths[$i]}"
+      _ps_report_worktree "${wt_paths[$i]}" "${wt_ids[$i]}" "${wt_ports[$i]}"
+    done
+  else
+    # Current worktree only
+    local wt_id wt_dir port
+    wt_id=$(current_worktree_id)
+    wt_dir=$(git rev-parse --show-toplevel)
+
+    if [[ "$wt_id" == "main" ]]; then
+      port="3000"
+    elif [[ "$wt_id" =~ ^wt([0-9]+)$ ]]; then
+      port=$((3000 + BASH_REMATCH[1]))
+    else
+      port="?"
+    fi
+
+    printf "${BOLD}── %s${NC}  (port %s, %s)\n" "$wt_id" "$port" "$wt_dir"
+    _ps_report_worktree "$wt_dir" "$wt_id" "$port"
+  fi
+}
+
 # --- Main dispatch ---
 
 ensure_in_repo
@@ -1700,6 +1901,7 @@ case "$command" in
   db-backup)  cmd_db_backup "$@" ;;
   db-restore) cmd_db_restore "$@" ;;
   merged)     cmd_merged ;;
+  ps)         cmd_ps "$@" ;;
   help)       cmd_help ;;
   *)          echo "Unknown command: $command"; usage ;;
 esac
