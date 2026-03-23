@@ -1764,6 +1764,45 @@ _ps_inngest_port() {
   tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -oP '(?<=-p )\d+' | head -1 || true
 }
 
+# Abbreviate a path: ~ for $HOME, single-char intermediate segments
+_ps_abbrev_path() {
+  local dir="$1"
+  if [[ "$dir" == "$HOME"* ]]; then
+    dir="~${dir#"$HOME"}"
+  fi
+  local IFS_save="$IFS"
+  IFS='/' read -ra parts <<< "$dir"
+  IFS="$IFS_save"
+  local n=${#parts[@]}
+  local result="${parts[0]}"
+  for (( j=1; j<n-1; j++ )); do
+    result+="/${parts[$j]:0:1}"
+  done
+  (( n > 1 )) && result+="/${parts[$n-1]}"
+  echo "$result"
+}
+
+# Detect which port proxy (Caddy) and ngrok are targeting.
+# Sets _proxy_port and _ngrok_port globals.
+_ps_detect_routing() {
+  _proxy_port=""
+  _ngrok_port=""
+
+  # Proxy: parse upstream port from Caddyfile
+  if caddy_is_running && [[ -f "$CADDYFILE" ]]; then
+    _proxy_port=$(grep -oP 'reverse_proxy \S+:(\K\d+)' "$CADDYFILE" 2>/dev/null || true)
+  fi
+
+  # Ngrok: parse backend port from API
+  if ngrok_is_running; then
+    local response
+    response=$(curl -s "$NGROK_API/tunnels" 2>/dev/null) || true
+    if [[ -n "$response" ]]; then
+      _ngrok_port=$(echo "$response" | grep -oP '"addr"\s*:\s*"[^:]+:\K\d+' | head -1 || true)
+    fi
+  fi
+}
+
 # Report processes for a single worktree
 _ps_report_worktree() {
   local wt_dir="$1" wt_id="$2" port="$3"
@@ -1811,6 +1850,19 @@ _ps_report_worktree() {
     printf "  %-14s %s  (%d connections)\n" "postgres" "${db_names[*]}" "$db_conns"
   fi
 
+  # Routing indicators
+  local routing=""
+  if [[ "$_proxy_port" == "$port" ]]; then
+    routing+=" proxy"
+  fi
+  if [[ "$_ngrok_port" == "$port" ]]; then
+    routing+=" ngrok"
+  fi
+  if [[ -n "$routing" ]]; then
+    found=true
+    printf "  ${GREEN}routing:%s${NC}\n" "$routing"
+  fi
+
   if ! $found; then
     printf "  ${YELLOW}no processes found${NC}\n"
   fi
@@ -1826,16 +1878,17 @@ cmd_ps() {
   main_dir=$(main_worktree_dir)
   repo=$(repo_name)
 
+  # Detect proxy/ngrok targets once
+  _ps_detect_routing
+
   if $show_all; then
     # Iterate all worktrees
     local -a wt_paths=() wt_ids=() wt_ports=()
-    local cur_wt="" cur_branch=""
+    local cur_wt=""
 
     while IFS= read -r line; do
       case "$line" in
         worktree\ *) cur_wt="${line#worktree }" ;;
-        branch\ *)   cur_branch="${line#branch refs/heads/}" ;;
-        detached)    cur_branch="(detached)" ;;
         "")
           if [[ -n "$cur_wt" ]]; then
             local dir_name id port
@@ -1851,18 +1904,20 @@ cmd_ps() {
             wt_ids+=("$id")
             wt_ports+=("$port")
           fi
-          cur_wt="" cur_branch=""
+          cur_wt=""
           ;;
       esac
     done < <(git worktree list --porcelain; echo "")
 
     for i in "${!wt_paths[@]}"; do
-      printf "${BOLD}── %s${NC}  (port %s, %s)\n" "${wt_ids[$i]}" "${wt_ports[$i]}" "${wt_paths[$i]}"
+      local display_dir
+      display_dir=$(_ps_abbrev_path "${wt_paths[$i]}")
+      printf "${BOLD}── %s${NC}  port %s\n" "$display_dir" "${wt_ports[$i]}"
       _ps_report_worktree "${wt_paths[$i]}" "${wt_ids[$i]}" "${wt_ports[$i]}"
     done
   else
     # Current worktree only
-    local wt_id wt_dir port
+    local wt_id wt_dir port display_dir
     wt_id=$(current_worktree_id)
     wt_dir=$(git rev-parse --show-toplevel)
 
@@ -1874,7 +1929,8 @@ cmd_ps() {
       port="?"
     fi
 
-    printf "${BOLD}── %s${NC}  (port %s, %s)\n" "$wt_id" "$port" "$wt_dir"
+    display_dir=$(_ps_abbrev_path "$wt_dir")
+    printf "${BOLD}── %s${NC}  port %s\n" "$display_dir" "$port"
     _ps_report_worktree "$wt_dir" "$wt_id" "$port"
   fi
 }
