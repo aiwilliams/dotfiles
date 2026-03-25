@@ -15,6 +15,7 @@
 #   wt merged                           Show worktrees whose branch PR has been merged
 #   wt switch [N|wtN|main]               Switch to worktree (fzf picker if no arg)
 #   wt env-sync                         Copy main .env to all worktrees
+#   wt claude-setup                     Configure Claude MCP for current worktree
 #   wt proxy [options] [N|off]           Route HTTPS proxy to a worktree
 #   wt ngrok [N|wtN|off]                Tunnel a worktree's port via ngrok
 #   wt ps [--all]                       Show running processes for current worktree
@@ -185,6 +186,29 @@ compute_port() {
   echo "$port"
 }
 
+# Configure Claude MCP dbhub server for a worktree's database.
+# Idempotent: removes any existing "db" MCP server before adding.
+configure_claude_mcp() {
+  local wt_dir="$1"
+  local wt_id="$2"
+
+  if ! command -v claude &>/dev/null; then
+    echo -e "${YELLOW}claude CLI not found, skipping MCP configuration${NC}"
+    return 0
+  fi
+
+  echo ""
+  echo -e "${BOLD}Configuring Claude MCP...${NC}"
+  (
+    cd "$wt_dir"
+    claude mcp remove -s project db 2>/dev/null || true
+    claude mcp add -s project --transport stdio db -- \
+      pnpm dlx @bytebase/dbhub --dsn "postgresql://${wt_id}:${wt_id}@localhost:${PG_PORT}/platform_${wt_id}"
+  ) \
+    && echo -e "${GREEN}Added dbhub MCP server for platform_${wt_id}${NC}" \
+    || echo -e "${YELLOW}Claude MCP configuration skipped${NC}"
+}
+
 # Update POSTGRES_*, PORT, NEXT_PUBLIC_HOST, and NEXT_PUBLIC_SITE_URL in a .env file.
 # Delegates POSTGRES_* handling to pg_apply_env, then layers on PORT, host, and site URL.
 #
@@ -276,6 +300,7 @@ Commands:
   main                           Switch to the main worktree
   switch [N|wtN|main]            Switch to worktree (interactive fzf picker if no arg)
   env-sync                       Copy main .env to all worktrees, preserving wt-specific vars
+  claude-setup                   Configure Claude MCP for current worktree's database
   proxy [options] [N|wtN|off]    Route HTTPS proxy to a worktree (show current if no arg)
   ngrok [options] [N|wtN|off]    Tunnel a worktree's port via ngrok (show status if no arg)
   merged                         Show worktrees whose branch PR has been merged
@@ -375,6 +400,12 @@ COMMANDS
     NEXT_PUBLIC_SITE_URL). PROXY_DOMAIN is preserved per-worktree (not copied
     from main). Run this after editing the primary .env to propagate changes
     to all worktrees.
+
+  wt claude-setup
+
+    Configure (or reconfigure) the Claude MCP dbhub server for the current
+    worktree's database. Idempotent — safe to run multiple times. Must be
+    run from inside a numbered worktree directory.
 
   wt proxy [--host <host>] [--domain <domain>] [N|wtN|off]
 
@@ -606,6 +637,9 @@ cmd_create() {
   fi
   write_env_vars "$wt_env" "$wt_id" "$port"
   echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL in .env${NC}"
+
+  # Configure Claude MCP for worktree database
+  configure_claude_mcp "$wt_dir" "$wt_id"
 
   # Track branch in Graphite
   if [[ -n "$branch" ]] && command -v gt &>/dev/null; then
@@ -1421,6 +1455,22 @@ cmd_db_backup() {
   pg_backup_worktree_dbs "$wt_id" "$label"
 }
 
+cmd_claude_setup() {
+  local wt_id
+  wt_id=$(current_worktree_id)
+
+  if [[ "$wt_id" == "main" ]]; then
+    echo -e "${RED}Error: claude-setup is for numbered worktrees, not main${NC}"
+    exit 1
+  fi
+
+  local n="${wt_id#wt}"
+  local wt_dir
+  wt_dir=$(worktree_dir_for_number "$n")
+
+  configure_claude_mcp "$wt_dir" "$wt_id"
+}
+
 cmd_env_sync() {
   local main_dir
   main_dir=$(main_worktree_dir)
@@ -1919,8 +1969,9 @@ case "$command" in
   list)       cmd_list ;;
   main)       cmd_main ;;
   switch)     cmd_switch "$@" ;;
-  env-sync)   cmd_env_sync ;;
-  proxy)      cmd_proxy "$@" ;;
+  env-sync)      cmd_env_sync ;;
+  claude-setup)  cmd_claude_setup ;;
+  proxy)         cmd_proxy "$@" ;;
   ngrok)      cmd_ngrok "$@" ;;
   db-backup)  cmd_db_backup "$@" ;;
   db-restore) cmd_db_restore "$@" ;;
