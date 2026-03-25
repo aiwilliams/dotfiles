@@ -143,9 +143,25 @@ if [ ! -f "$SYSCTL_INOTIFY" ]; then
 fi
 
 SYSCTL_MEMORY="/etc/sysctl.d/60-memory.conf"
-if [ ! -f "$SYSCTL_MEMORY" ]; then
-  echo "Reserving 512MB kernel memory for network processing under pressure..."
-  echo "vm.min_free_kbytes=524288" | sudo tee "$SYSCTL_MEMORY" > /dev/null
+TOTAL_RAM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+# Reserve ~1% of RAM for min_free_kbytes, clamped to 128MB–1GB
+MIN_FREE_KB=$(( TOTAL_RAM_KB / 100 ))
+(( MIN_FREE_KB < 131072 )) && MIN_FREE_KB=131072
+(( MIN_FREE_KB > 1048576 )) && MIN_FREE_KB=1048576
+# Less RAM → more willing to swap; plenty of RAM → strongly prefer RAM
+if (( TOTAL_RAM_KB <= 8388608 )); then
+  SWAPPINESS=30
+elif (( TOTAL_RAM_KB <= 33554432 )); then
+  SWAPPINESS=15
+else
+  SWAPPINESS=10
+fi
+SYSCTL_MEMORY_DESIRED="vm.min_free_kbytes=$MIN_FREE_KB
+vm.swappiness=$SWAPPINESS
+vm.vfs_cache_pressure=50"
+if [ ! -f "$SYSCTL_MEMORY" ] || ! diff -q <(echo "$SYSCTL_MEMORY_DESIRED") "$SYSCTL_MEMORY" &>/dev/null; then
+  echo "Configuring kernel memory tuning (min_free_kbytes=${MIN_FREE_KB}kB, swappiness=$SWAPPINESS, vfs_cache_pressure=50)..."
+  echo "$SYSCTL_MEMORY_DESIRED" | sudo tee "$SYSCTL_MEMORY" > /dev/null
   sudo sysctl --system
 fi
 
