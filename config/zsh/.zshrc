@@ -50,6 +50,16 @@ case "$(uname -s)" in
     ;;
 esac
 
+# --- Terminal fixups ---
+
+# Ghostty supports the kitty keyboard protocol (CSI u). TUI programs like
+# Claude Code and neovim push this mode on startup but may not pop it on
+# exit (especially unclean exits), leaving the terminal in a state where
+# Ctrl-C, Ctrl-R, etc. emit raw CSI sequences instead of working normally.
+# Popping an empty stack is a harmless no-op.
+_reset_keyboard_protocol() { printf '\e[<u'; }
+precmd_functions+=(_reset_keyboard_protocol)
+
 # --- Tools ---
 
 eval "$(mise activate zsh)"
