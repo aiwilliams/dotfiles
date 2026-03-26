@@ -52,12 +52,11 @@ esac
 
 # --- Terminal fixups ---
 
-# Ghostty supports the kitty keyboard protocol (CSI u). TUI programs like
-# Claude Code and neovim push this mode on startup but may not pop it on
-# exit (especially unclean exits), leaving the terminal in a state where
-# Ctrl-C, Ctrl-R, etc. emit raw CSI sequences instead of working normally.
-# Popping an empty stack is a harmless no-op.
-_reset_keyboard_protocol() { printf '\e[<u' >/dev/tty; }
+# TUI programs (Claude Code, neovim) may push the kitty keyboard protocol
+# and/or enable xterm modifyOtherKeys without properly restoring on exit,
+# leaving Ctrl-C, Ctrl-R, etc. emitting raw CSI u sequences. Pop up to 99
+# kitty protocol stack entries and reset modifyOtherKeys before each prompt.
+_reset_keyboard_protocol() { printf '\e[<99u\e[>4;0m' >/dev/tty; }
 precmd_functions+=(_reset_keyboard_protocol)
 
 # --- Tools ---
