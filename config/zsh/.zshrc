@@ -57,7 +57,7 @@ esac
 # exit (especially unclean exits), leaving the terminal in a state where
 # Ctrl-C, Ctrl-R, etc. emit raw CSI sequences instead of working normally.
 # Popping an empty stack is a harmless no-op.
-_reset_keyboard_protocol() { printf '\e[<u'; }
+_reset_keyboard_protocol() { printf '\e[<u' >/dev/tty; }
 precmd_functions+=(_reset_keyboard_protocol)
 
 # --- Tools ---
