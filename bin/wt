@@ -24,6 +24,14 @@
 
 set -euo pipefail
 
+# Prefer GNU column (from util-linux) over macOS BSD column, which chokes on
+# multi-byte UTF-8 characters with "column: line too long".
+if [[ -x /opt/homebrew/opt/util-linux/bin/column ]]; then
+  COLUMN=/opt/homebrew/opt/util-linux/bin/column
+else
+  COLUMN=column
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
 
@@ -941,10 +949,10 @@ cmd_remove() {
     fi
 
     local formatted
-    formatted=$(column -t -s $'\t' < /tmp/wt_remove_list.$$)
+    formatted=$($COLUMN -t -s $'\t' < /tmp/wt_remove_list.$$)
 
     local header
-    header=$(printf "%s\t%s\t%s\t%s\t%s" "ID" "BRANCH" "PORT" "STATUS" "COMMIT" | column -t -s $'\t')
+    header=$(printf "%s\t%s\t%s\t%s\t%s" "ID" "BRANCH" "PORT" "STATUS" "COMMIT" | $COLUMN -t -s $'\t')
 
     local selection
     selection=$(echo "$formatted" | fzf --prompt="Remove worktree: " --header="$header") || {
@@ -1154,7 +1162,7 @@ cmd_list() {
 
       printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$id" "$display_dir" "$branch" "$port" "$status" "${commit:0:7}"
     done
-  } | column -t -s $'\t' | {
+  } | $COLUMN -t -s $'\t' | {
     IFS= read -r header
     echo -e "${BOLD}${header}${NC}"
     cat
@@ -1946,7 +1954,7 @@ cmd_ps() {
     output+="${id}\t${display_dir}\t${port}\t${next_info}\t${inngest_info}\t${db_display}\t${routing}\n"
   done
 
-  printf "%b" "$output" | column -t -s $'\t' | {
+  printf "%b" "$output" | $COLUMN -t -s $'\t' | {
     IFS= read -r header
     echo -e "${BOLD}${header}${NC}"
     cat

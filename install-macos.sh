@@ -17,7 +17,7 @@ else
   brew update
 fi
 
-brew_install tmux gh fzf shellcheck yq gitleaks mkcert caddy
+brew_install tmux gh fzf shellcheck yq gitleaks mkcert caddy util-linux
 brew_install_cask ngrok
 
 # --- Docker via Colima ---
