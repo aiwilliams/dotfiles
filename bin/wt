@@ -949,10 +949,11 @@ cmd_remove() {
     fi
 
     local formatted
-    formatted=$($COLUMN -t -s $'\t' < /tmp/wt_remove_list.$$)
+    formatted=$({ printf "%s\t%s\t%s\t%s\t%s\n" "ID" "BRANCH" "PORT" "STATUS" "COMMIT"; cat /tmp/wt_remove_list.$$; } | $COLUMN -t -s $'\t')
 
     local header
-    header=$(printf "%s\t%s\t%s\t%s\t%s" "ID" "BRANCH" "PORT" "STATUS" "COMMIT" | $COLUMN -t -s $'\t')
+    header=$(head -1 <<< "$formatted")
+    formatted=$(tail -n +2 <<< "$formatted")
 
     local selection
     selection=$(echo "$formatted" | fzf --prompt="Remove worktree: " --header="$header") || {
