@@ -18,7 +18,19 @@ export NX_TUI=false
 
 # --- Aliases & Functions ---
 
-alias vim=nvim
+# Neovim v0.11+ sends a DA1 query (\e[c) during its exit cleanup, just before
+# leaving the alternate screen. Over SSH, the round-trip to Ghostty means the
+# response (\e[?62;22;52c) arrives after neovim has exited, so it leaks to the
+# shell prompt as "62;22;52c". Wrapping nvim in a function that briefly drains
+# stdin after exit catches these stale terminal responses. The 50ms timeout
+# covers typical SSH round-trip latency; on a local terminal the drain is
+# near-instant. Type-ahead is not a concern here since users don't pre-type
+# commands while still inside vim.
+vim() {
+  command nvim "$@"
+  local _byte
+  while read -t 0.05 -k 1 _byte 2>/dev/null; do :; done
+}
 
 # Wrap wt so that `wt switch` can cd in the current shell
 wt() {
