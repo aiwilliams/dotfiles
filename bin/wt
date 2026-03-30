@@ -35,8 +35,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
 
-# shellcheck source=../lib/postgres.sh
-source "$LIB_DIR/postgres.sh"
+# shellcheck source=../lib/wt-plugins.sh
+source "$LIB_DIR/wt-plugins.sh"
 # shellcheck source=../lib/projects.sh
 source "$LIB_DIR/projects.sh"
 # shellcheck source=../lib/caddy.sh
@@ -217,8 +217,7 @@ configure_claude_mcp() {
     || echo -e "${YELLOW}Claude MCP configuration skipped${NC}"
 }
 
-# Update POSTGRES_*, PORT, NEXT_PUBLIC_HOST, and NEXT_PUBLIC_SITE_URL in a .env file.
-# Delegates POSTGRES_* handling to pg_apply_env, then layers on PORT, host, and site URL.
+# Update PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL, and plugin-managed vars in a .env file.
 #
 # If PROXY_DOMAIN is set in the env file (e.g. opine.localhost), NEXT_PUBLIC_SITE_URL
 # and NEXT_PUBLIC_HOST use the proxy domain instead of hostname:port. PORT is still
@@ -246,7 +245,7 @@ write_env_vars() {
     public_host="$host"
   fi
 
-  # Strip managed vars if the file exists (pg_apply_env handles POSTGRES_*)
+  # Strip managed vars if the file exists (plugins handle their own vars)
   if [[ -f "$env_file" ]]; then
     local tmp
     tmp=$(mktemp)
@@ -266,7 +265,7 @@ write_env_vars() {
     } > "$env_file"
   fi
 
-  pg_apply_env "$env_file" "$wt_identifier"
+  wt_dispatch_hook env "$env_file" "$wt_identifier"
 }
 
 # --------------------------------------------------------------------------
@@ -312,6 +311,8 @@ Commands:
   proxy [options] [N|wtN|off]    Route HTTPS proxy to a worktree (show current if no arg)
   ngrok [options] [N|wtN|off]    Tunnel a worktree's port via ngrok (show status if no arg)
   merged                         Show worktrees whose branch PR has been merged
+  db-init [--all]                Create databases and update env vars for existing worktrees
+  db-status                      Show database status for current worktree
   db-backup [label]              Backup current worktree's databases (optional label)
   db-restore [timestamp]         Restore databases from a backup (fzf picker if no arg)
   help                           Show detailed documentation
@@ -326,7 +327,7 @@ wt — Git worktree manager with per-worktree database isolation.
 OVERVIEW
 
   wt automates creating, managing, and removing git worktrees with isolated
-  PostgreSQL databases and unique dev-server ports. Each worktree gets an
+  databases (via plugins) and unique dev-server ports. Each worktree gets an
   auto-incrementing identifier (wt1, wt2, ...) that serves as the stable key
   for its directory, databases, and port. Gaps are filled: if wt1 and wt3
   exist, the next worktree gets wt2.
@@ -336,9 +337,9 @@ THE wtN NUMBERING SYSTEM
   Everything derives from the worktree number N:
 
     Directory   ../<repo>-wt<N>     e.g. ../myapp-wt1
-    Databases   <repo>_wt<N>_*      e.g. myapp_wt1_dev, myapp_wt1_test
+    Databases   <prefix>_wt<N>       e.g. platform_wt1, analytics_wt1
     Port        3000 + N            e.g. 3001 for wt1, 3002 for wt2
-    .env        PORT, POSTGRES_*, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL are set automatically
+    .env        PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL, and plugin vars set automatically
 
 COMMANDS
 
@@ -404,8 +405,9 @@ COMMANDS
   wt env-sync
 
     Copy the main worktree's apps/platform/.env to every wtN worktree, then
-    re-apply each worktree's specific vars (POSTGRES_*, PORT, NEXT_PUBLIC_HOST,
-    NEXT_PUBLIC_SITE_URL). PROXY_DOMAIN is preserved per-worktree (not copied
+    re-apply each worktree's specific vars (PORT, NEXT_PUBLIC_HOST,
+    NEXT_PUBLIC_SITE_URL, and plugin-managed database vars). PROXY_DOMAIN
+    is preserved per-worktree (not copied
     from main). Run this after editing the primary .env to propagate changes
     to all worktrees.
 
@@ -457,8 +459,7 @@ COMMANDS
   wt ps [--all|-a]
 
     Show running processes for the current worktree: next-server, inngest,
-    and PostgreSQL databases with connection counts. Use --all to show all
-    worktrees.
+    and database status from active plugins. Use --all to show all worktrees.
 
     Examples:
       wt ps              # current worktree
@@ -468,11 +469,22 @@ COMMANDS
 
     Show this documentation.
 
+PLUGINS
+
+  wt uses a plugin system for database isolation. Each project declares its
+  plugins in a .wtrc file in the main worktree root (shell-sourceable):
+
+    WT_PLUGINS=(postgres clickhouse)
+    WT_POSTGRES_DB_PREFIXES=(platform vector)
+    WT_CLICKHOUSE_DB_PREFIXES=(analytics)
+
+  Without a .wtrc, no plugins are loaded and no databases are managed.
+  Available plugins: postgres, clickhouse.
+
 COMPANION TOOL: db-worktree
 
   db-worktree manages PostgreSQL databases independently of git worktrees.
-  wt calls it automatically during create/remove, but you can use it directly
-  for lower-level database operations.
+  It can be used directly for lower-level PostgreSQL operations.
 
   db-worktree subcommands:
     create <id>           Create empty DBs + user
@@ -483,13 +495,32 @@ COMPANION TOOL: db-worktree
     status <id>           Show DB sizes, user, extensions
     init-main             Create main branch DBs (first-time setup)
 
-  wt create calls db-worktree clone; wt remove calls db-worktree drop.
+DATABASE MANAGEMENT
+
+  wt db-init [--all]
+
+    Create databases and update database env vars for existing worktrees.
+    Useful after adding a new plugin to .wtrc — it creates any missing
+    databases and writes the plugin's env vars into .env without touching
+    PORT, NEXT_PUBLIC_*, or other non-database vars.
+
+    With no argument, operates on the current worktree. Use --all to
+    initialize all worktrees.
+
+    Examples:
+      wt db-init              # current worktree
+      wt db-init --all        # all worktrees
+
+  wt db-status
+
+    Show database status for the current worktree across all active plugins.
+    Displays database sizes, table counts, extensions, and other details.
 
 DATABASE BACKUP & RESTORE
 
   wt db-backup [label]
 
-    Dump all databases for the current worktree using pg_dump (custom format).
+    Dump all databases for the current worktree via active plugins.
     Backups are timestamped and stored under ~/.local/share/wt-backups/<id>/.
     An optional label (e.g. "before-migration") is saved alongside the backup
     for easy identification.
@@ -629,9 +660,9 @@ cmd_create() {
       || git worktree add "$wt_dir" -b "$branch"
   fi
 
-  # Clone databases from main
+  # Run plugin create hooks (clone databases, etc.)
   echo ""
-  pg_clone_worktree_dbs "$wt_id"
+  wt_dispatch_hook create "$wt_id"
 
   # Copy main .env then apply worktree-specific vars
   local main_env
@@ -644,7 +675,7 @@ cmd_create() {
     echo -e "${GREEN}Copied .env from main${NC}"
   fi
   write_env_vars "$wt_env" "$wt_id" "$port"
-  echo -e "${GREEN}Updated POSTGRES_*, PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL in .env${NC}"
+  echo -e "${GREEN}Updated env vars in .env${NC}"
 
   # Configure Claude MCP for worktree database
   configure_claude_mcp "$wt_dir" "$wt_id"
@@ -787,9 +818,9 @@ remove_one() {
     fi
   fi
 
-  # Drop databases and user
+  # Run plugin remove hooks (drop databases, etc.)
   echo ""
-  pg_drop_worktree_dbs "$wt_id"
+  wt_dispatch_hook remove "$wt_id"
 
   echo ""
   echo -e "${BOLD}Done.${NC}"
@@ -1454,14 +1485,86 @@ cmd_switch() {
   fi
 }
 
+cmd_db_init() {
+  local do_all=false
+  [[ "${1:-}" == "--all" ]] && do_all=true
+
+  local main_dir repo parent_dir
+  main_dir=$(main_worktree_dir)
+  repo=$(repo_name)
+  parent_dir=$(dirname "$main_dir")
+
+  local -a wt_dirs=() wt_ids=()
+
+  if $do_all; then
+    # Main worktree
+    wt_dirs+=("$main_dir")
+    wt_ids+=("main")
+    # Numbered worktrees
+    for dir in "$parent_dir/${repo}"-wt[0-9]*; do
+      [[ -d "$dir" ]] || continue
+      local name num
+      name=$(basename "$dir")
+      num="${name#"${repo}-wt"}"
+      if [[ "$num" =~ ^[0-9]+$ ]]; then
+        wt_dirs+=("$dir")
+        wt_ids+=("wt${num}")
+      fi
+    done
+  else
+    local wt_id
+    wt_id=$(current_worktree_id)
+    wt_dirs+=("$(git rev-parse --show-toplevel)")
+    wt_ids+=("$wt_id")
+  fi
+
+  for i in "${!wt_ids[@]}"; do
+    local wt_id="${wt_ids[$i]}"
+    local wt_dir="${wt_dirs[$i]}"
+    local env_file
+    env_file=$(env_file_for "$wt_dir")
+
+    echo -e "${BOLD}${wt_id}${NC}"
+    wt_dispatch_hook create "$wt_id"
+    if [[ -f "$env_file" ]]; then
+      wt_dispatch_hook env "$env_file" "$wt_id"
+      echo -e "${GREEN}Updated database env vars${NC}"
+    fi
+    echo ""
+  done
+}
+
+cmd_db_status() {
+  local wt_id
+  wt_id=$(current_worktree_id)
+
+  echo -e "${BOLD}Database status for ${wt_id}${NC}"
+  echo ""
+  wt_dispatch_hook status "$wt_id"
+}
+
 cmd_db_backup() {
   local label="${1:-}"
   local wt_id
   wt_id=$(current_worktree_id)
+  local sanitized
+  sanitized=$(wt_sanitize_name "$wt_id")
+  local timestamp
+  timestamp=$(date +%Y%m%d-%H%M%S)
+  local backup_subdir="${WT_BACKUP_DIR}/${sanitized}/${timestamp}"
+
+  mkdir -p "$backup_subdir"
 
   echo -e "${BOLD}Backing up databases for ${wt_id}${NC}"
   echo ""
-  pg_backup_worktree_dbs "$wt_id" "$label"
+  wt_dispatch_hook backup "$wt_id" "$backup_subdir"
+
+  if [[ -n "$label" ]]; then
+    echo "$label" > "${backup_subdir}/label"
+  fi
+
+  echo ""
+  echo -e "==> Backup saved to ${backup_subdir}"
 }
 
 cmd_claude_setup() {
@@ -1614,8 +1717,8 @@ cmd_db_restore() {
   local wt_id
   wt_id=$(current_worktree_id)
   local sanitized
-  sanitized=$(pg_sanitize_branch_name "$wt_id")
-  local backup_dir="${PG_BACKUP_DIR}/${sanitized}"
+  sanitized=$(wt_sanitize_name "$wt_id")
+  local backup_dir="${WT_BACKUP_DIR}/${sanitized}"
 
   if [[ ! -d "$backup_dir" ]]; then
     echo -e "${RED}No backups found for ${wt_id}${NC}"
@@ -1628,12 +1731,12 @@ cmd_db_restore() {
       echo -e "${RED}fzf is required for interactive selection, or pass a timestamp.${NC}"
       echo ""
       echo "Available backups:"
-      pg_list_backups "$wt_id"
+      wt_list_backups "$wt_id"
       exit 1
     fi
 
     local listing
-    listing=$(pg_list_backups "$wt_id")
+    listing=$(wt_list_backups "$wt_id")
     if [[ -z "$listing" ]]; then
       echo -e "${RED}No backups found for ${wt_id}${NC}"
       exit 1
@@ -1652,7 +1755,7 @@ cmd_db_restore() {
 
   echo -e "${BOLD}Restoring databases for ${wt_id} from ${timestamp}${NC}"
   echo ""
-  pg_restore_worktree_dbs "$wt_id" "$backup_subdir"
+  wt_dispatch_hook restore "$wt_id" "$backup_subdir"
 }
 
 cmd_ngrok() {
@@ -1902,11 +2005,11 @@ cmd_ps() {
 
   # Collect rows
   local output=""
-  output+="ID\tDIRECTORY\tPORT\tNEXT\tINNGEST\tPOSTGRES\tROUTING\n"
+  output+="ID\tDIRECTORY\tPORT\tNEXT\tINNGEST$(wt_ps_headers)\tROUTING\n"
 
   for i in "${!wt_paths[@]}"; do
     local wt="${wt_paths[$i]}" id="${wt_ids[$i]}" port="${wt_ports[$i]}"
-    local display_dir next_info inngest_info db_conns routing
+    local display_dir next_info inngest_info routing
 
     display_dir=$(_ps_abbrev_path "$wt")
 
@@ -1928,31 +2031,13 @@ cmd_ps() {
       inngest_info="-"
     fi
 
-    # postgres connections
-    local sanitized="$id"
-    db_conns=0
-    local has_db=false
-    for prefix in "${DB_PREFIXES[@]}"; do
-      local dbname="${prefix}_${sanitized}"
-      if pg_db_exists "$dbname" 2>/dev/null; then
-        has_db=true
-        local conns
-        conns=$(pg_exec "SELECT count(*) FROM pg_stat_activity WHERE datname = '$dbname';" 2>/dev/null) || conns=0
-        db_conns=$((db_conns + conns))
-      fi
-    done
-    local db_display="-"
-    if $has_db; then
-      db_display="${db_conns} conn"
-    fi
-
     # routing
     routing=""
     [[ "$proxy_port" == "$port" ]] && routing+="proxy "
     [[ "$ngrok_port" == "$port" ]] && routing+="ngrok "
     routing="${routing:--}"
 
-    output+="${id}\t${display_dir}\t${port}\t${next_info}\t${inngest_info}\t${db_display}\t${routing}\n"
+    output+="${id}\t${display_dir}\t${port}\t${next_info}\t${inngest_info}$(wt_ps_data "$id")\t${routing}\n"
   done
 
   printf "%b" "$output" | $COLUMN -t -s $'\t' | {
@@ -1965,6 +2050,7 @@ cmd_ps() {
 # --- Main dispatch ---
 
 ensure_in_repo
+wt_load_plugins "$(main_worktree_dir)"
 
 [[ $# -lt 1 ]] && { cmd_help; exit 0; }
 
@@ -1982,6 +2068,8 @@ case "$command" in
   claude-setup)  cmd_claude_setup ;;
   proxy)         cmd_proxy "$@" ;;
   ngrok)      cmd_ngrok "$@" ;;
+  db-init)    cmd_db_init "$@" ;;
+  db-status)  cmd_db_status ;;
   db-backup)  cmd_db_backup "$@" ;;
   db-restore) cmd_db_restore "$@" ;;
   merged)     cmd_merged ;;
