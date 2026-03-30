@@ -1,3 +1,13 @@
+# Shell Scripts
+
+All bash scripts must be compatible with **Bash 3.2** (macOS default). Key constraints:
+
+- Empty arrays with `set -u`: `"${arr[@]}"` is an unbound variable error. Guard with `[[ ${#arr[@]} -gt 0 ]]` before expanding.
+- No associative arrays (`declare -A`).
+- No `readarray`/`mapfile`. Use `while read` loops instead.
+- No `${var,,}` / `${var^^}` case conversion. Use `tr` instead.
+- No `|&` (pipe stderr). Use `2>&1 |` instead.
+
 # Worktree & Database Management
 
 Local development uses native PostgreSQL 18 with pgvector (not Docker). Two CLI tools in `~/dotfiles/bin/` manage worktrees and databases. Run each command with `--help` or no arguments to see available subcommands and usage.

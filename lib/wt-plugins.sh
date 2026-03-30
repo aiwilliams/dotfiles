@@ -84,16 +84,18 @@ wt_load_plugins() {
   fi
 
   local missing=0
-  for plugin in "${WT_PLUGINS[@]}"; do
-    local plugin_file="${LIB_DIR}/wt-plugin-${plugin}.sh"
-    if [[ -f "$plugin_file" ]]; then
-      # shellcheck source=/dev/null
-      source "$plugin_file"
-    else
-      echo "Error: plugin '${plugin}' not found at ${plugin_file}" >&2
-      missing=1
-    fi
-  done
+  if [[ ${#WT_PLUGINS[@]} -gt 0 ]]; then
+    for plugin in "${WT_PLUGINS[@]}"; do
+      local plugin_file="${LIB_DIR}/wt-plugin-${plugin}.sh"
+      if [[ -f "$plugin_file" ]]; then
+        # shellcheck source=/dev/null
+        source "$plugin_file"
+      else
+        echo "Error: plugin '${plugin}' not found at ${plugin_file}" >&2
+        missing=1
+      fi
+    done
+  fi
 
   if (( missing )); then
     echo "Fix WT_PLUGINS in ${wtrc} or install the missing plugin files." >&2
@@ -107,6 +109,7 @@ wt_load_plugins() {
 wt_dispatch_hook() {
   local hook="$1"; shift
   local failed=0
+  [[ ${#WT_PLUGINS[@]} -gt 0 ]] || return 0
   for plugin in "${WT_PLUGINS[@]}"; do
     local fn="wtp_${plugin}_${hook}"
     if declare -f "$fn" > /dev/null 2>&1; then
@@ -123,6 +126,7 @@ wt_dispatch_hook() {
 # Collect ps column headers from all plugins (tab-separated).
 wt_ps_headers() {
   local headers=""
+  [[ ${#WT_PLUGINS[@]} -gt 0 ]] || { printf '%s' "$headers"; return; }
   for plugin in "${WT_PLUGINS[@]}"; do
     local fn="wtp_${plugin}_ps_header"
     if declare -f "$fn" > /dev/null 2>&1; then
@@ -139,6 +143,7 @@ wt_ps_headers() {
 wt_ps_data() {
   local wt_id="$1"
   local data=""
+  [[ ${#WT_PLUGINS[@]} -gt 0 ]] || { printf '%s' "$data"; return; }
   for plugin in "${WT_PLUGINS[@]}"; do
     local fn="wtp_${plugin}_ps_data"
     if declare -f "$fn" > /dev/null 2>&1; then
