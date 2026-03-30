@@ -126,7 +126,7 @@ ngrok_wait_or_fail() {
     local response
     response=$(curl -s "$NGROK_API/tunnels" 2>/dev/null) || { sleep 0.25; continue; }
     local url
-    url=$(echo "$response" | grep -oP '"public_url"\s*:\s*"\K[^"]+' | head -1)
+    url=$(echo "$response" | sed -n 's/.*"public_url" *: *"\([^"]*\)".*/\1/p' | head -1)
     if [[ -n "$url" ]]; then
       return 0
     fi
@@ -147,7 +147,7 @@ _ngrok_print_log_error() {
   [[ -f "$NGROK_LOGFILE" ]] || return
   local err
   err=$(grep '"lvl":"eror"\|"lvl":"crit"' "$NGROK_LOGFILE" | tail -1 \
-    | grep -oP '"err"\s*:\s*"\K[^"]+' || true)
+    | sed -n 's/.*"err" *: *"\([^"]*\)".*/\1/p' || true)
   if [[ -n "$err" ]]; then
     # Unescape JSON newlines for readability
     echo "${err//\\n/$'\n'}"
@@ -175,8 +175,8 @@ ngrok_status() {
     response=$(curl -s "$NGROK_API/tunnels" 2>/dev/null) || true
 
     local url backend
-    url=$(echo "$response" | grep -oP '"public_url"\s*:\s*"\K[^"]+' | head -1)
-    backend=$(echo "$response" | grep -oP '"addr"\s*:\s*"\K[^"]+' | head -1)
+    url=$(echo "$response" | sed -n 's/.*"public_url" *: *"\([^"]*\)".*/\1/p' | head -1)
+    backend=$(echo "$response" | sed -n 's/.*"addr" *: *"\([^"]*\)".*/\1/p' | head -1)
 
     if [[ -n "$url" && -n "$backend" ]]; then
       echo "  status:  running"

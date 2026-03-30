@@ -6,6 +6,7 @@ All bash scripts must be compatible with **Bash 3.2** (macOS default). Key const
 - No associative arrays (`declare -A`).
 - No `readarray`/`mapfile`. Use `while read` loops instead.
 - No `${var,,}` / `${var^^}` case conversion. Use `tr` instead.
+- No `grep -P` (Perl regex). Use `sed -n 's/…/\1/p'` for extraction instead of `grep -oP` with `\K`.
 - No `|&` (pipe stderr). Use `2>&1 |` instead.
 
 # Worktree & Database Management

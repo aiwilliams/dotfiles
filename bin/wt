@@ -1978,13 +1978,13 @@ cmd_ps() {
   # Detect proxy/ngrok target ports once
   local proxy_port="" ngrok_port=""
   if caddy_is_running && [[ -f "$CADDYFILE" ]]; then
-    proxy_port=$(grep -oP 'reverse_proxy \S+:(\K\d+)' "$CADDYFILE" 2>/dev/null || true)
+    proxy_port=$(sed -n 's/.*reverse_proxy [^:]*:\([0-9]*\).*/\1/p' "$CADDYFILE" 2>/dev/null || true)
   fi
   if ngrok_is_running; then
     local response
     response=$(curl -s "$NGROK_API/tunnels" 2>/dev/null) || true
     if [[ -n "$response" ]]; then
-      ngrok_port=$(echo "$response" | grep -oP '"addr"\s*:\s*"[^:]+:\K\d+' | head -1 || true)
+      ngrok_port=$(echo "$response" | sed -n 's/.*"addr" *: *"[^:]*:\([0-9]*\)".*/\1/p' | head -1 || true)
     fi
   fi
 

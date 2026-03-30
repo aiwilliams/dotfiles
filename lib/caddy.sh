@@ -134,9 +134,9 @@ caddy_status() {
   if caddy_is_running; then
     if [[ -f "$CADDYFILE" ]]; then
       local upstream
-      upstream=$(grep -oP 'reverse_proxy \K\S+' "$CADDYFILE" 2>/dev/null || echo "unknown")
+      upstream=$(sed -n 's/.*reverse_proxy  *\([^ ]*\).*/\1/p' "$CADDYFILE" 2>/dev/null || echo "unknown")
       local domain
-      domain=$(grep -oP '^\S+\s*\{' "$CADDYFILE" | grep -v '^{' | head -1 | sed 's/ *{//')
+      domain=$(sed -n 's/^\([^ ]*\)  *{.*/\1/p' "$CADDYFILE" | head -1)
       echo "running: https://${domain} → ${upstream}"
     else
       echo "running (no config)"
