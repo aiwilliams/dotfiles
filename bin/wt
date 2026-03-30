@@ -1784,8 +1784,9 @@ Examples:
   wt ngrok 1                      # local: tunnel to wt1 (port 3001)
   wt ngrok main                   # local: tunnel to main (port 3000)
   wt ngrok off                    # stop ngrok
-  wt ngrok                        # show current tunnel status
+  wt ngrok                        # show status + detect orphans
   wt ngrok log                    # tail the ngrok log
+  wt ngrok kill                   # kill all orphan ngrok processes
   wt ngrok --host fw 6            # remote: tunnel to fw:3006
 HELP
         return
@@ -1809,7 +1810,7 @@ HELP
 
   # No argument: show status
   if [[ -z "$target" ]]; then
-    echo -n "ngrok: "
+    echo "ngrok:"
     ngrok_status
     return
   fi
@@ -1818,6 +1819,13 @@ HELP
   if [[ "$target" == "off" ]]; then
     ngrok_stop
     echo "ngrok stopped."
+    local -a orphans=()
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] && orphans+=("$pid")
+    done < <(ngrok_orphan_pids)
+    if [[ ${#orphans[@]} -gt 0 ]]; then
+      echo "Note: ${#orphans[@]} orphan ngrok process(es) still running. Use 'wt ngrok kill' to stop them."
+    fi
     return
   fi
 
@@ -1827,6 +1835,21 @@ HELP
       tail -f "$NGROK_LOGFILE"
     else
       echo "No log file yet. Start ngrok first."
+    fi
+    return
+  fi
+
+  # "kill": kill orphan ngrok processes
+  if [[ "$target" == "kill" ]]; then
+    local -a orphans=()
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] && orphans+=("$pid")
+    done < <(ngrok_orphan_pids)
+    if [[ ${#orphans[@]} -eq 0 ]]; then
+      echo "No orphan ngrok processes found."
+    else
+      echo "Killing ${#orphans[@]} orphan ngrok process(es): ${orphans[*]}"
+      kill "${orphans[@]}" 2>/dev/null || true
     fi
     return
   fi
@@ -1845,6 +1868,11 @@ HELP
   target_port=$(proxy_target_to_port "$target")
 
   ngrok_start "$upstream_host" "$target_port"
+
+  if ! ngrok_wait_or_fail; then
+    echo -e "${RED}ngrok failed to start${NC}" >&2
+    return 1
+  fi
 
   local domain
   domain=$(ngrok_domain)
