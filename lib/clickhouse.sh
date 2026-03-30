@@ -32,6 +32,29 @@ ch_db_exists() {
   [[ "$result" == "1" ]]
 }
 
+# Returns tab-separated name\tengine rows from system.tables, ordered so
+# regular tables come before views and materialized views.
+_ch_list_objects() {
+  local dbname="$1"
+  ch_exec "
+    SELECT name, engine FROM system.tables
+    WHERE database = '${dbname}'
+    ORDER BY CASE engine
+      WHEN 'MaterializedView' THEN 2
+      WHEN 'View' THEN 1
+      ELSE 0
+    END, name
+  "
+}
+
+# True if a CREATE MATERIALIZED VIEW statement uses a TO clause (routes data
+# to an explicit target table and has no storage of its own).
+_ch_mv_routes_to_table() {
+  local create_sql="$1"
+  local first_line="${create_sql%%$'\n'*}"
+  [[ "$first_line" == *" TO "* ]]
+}
+
 ch_create_db() {
   local dbname="$1"
   if ch_db_exists "$dbname"; then
@@ -60,23 +83,48 @@ ch_clone_db() {
   echo "Cloning '$source' -> '$target'..."
   ch_exec "CREATE DATABASE \"$target\""
 
-  local tables
-  tables=$(ch_exec "SHOW TABLES FROM \"$source\"")
-  if [[ -z "$tables" ]]; then
+  local table_info
+  table_info=$(_ch_list_objects "$source")
+  if [[ -z "$table_info" ]]; then
     echo "  (no tables to clone)"
     return 0
   fi
 
-  while IFS= read -r table; do
+  while IFS=$'\t' read -r table engine; do
     [[ -z "$table" ]] && continue
-    echo "  Cloning table '$table'..."
-    if ! ch_exec "CREATE TABLE \"$target\".\"$table\" AS \"$source\".\"$table\"" \
-      || ! ch_exec "INSERT INTO \"$target\".\"$table\" SELECT * FROM \"$source\".\"$table\""; then
-      echo "Error: failed to clone table '$table'. Dropping incomplete database '$target'." >&2
-      ch_exec "DROP DATABASE IF EXISTS \"$target\"" 2>/dev/null || true
-      return 1
-    fi
-  done <<< "$tables"
+    echo "  Cloning $engine '$table'..."
+
+    case "$engine" in
+      View|MaterializedView)
+        # Recreate views/MVs from their DDL with database references rewritten.
+        local create_sql
+        create_sql=$(ch_exec "SHOW CREATE TABLE \"$source\".\"$table\" FORMAT TabSeparatedRaw")
+        create_sql="${create_sql//$source/$target}"
+
+        if ! ch_exec "$create_sql"; then
+          echo "Error: failed to clone $engine '$table'. Dropping incomplete database '$target'." >&2
+          ch_exec "DROP DATABASE IF EXISTS \"$target\"" 2>/dev/null || true
+          return 1
+        fi
+
+        # Materialized views with implicit storage (no TO clause) hold their
+        # own data — copy it so the clone has the same query results.
+        if [[ "$engine" == "MaterializedView" ]] && ! _ch_mv_routes_to_table "$create_sql"; then
+          ch_exec "INSERT INTO \"$target\".\"$table\" SELECT * FROM \"$source\".\"$table\"" 2>/dev/null || true
+        fi
+        ;;
+
+      *)
+        # Regular table: clone schema then copy data.
+        if ! ch_exec "CREATE TABLE \"$target\".\"$table\" AS \"$source\".\"$table\"" \
+          || ! ch_exec "INSERT INTO \"$target\".\"$table\" SELECT * FROM \"$source\".\"$table\""; then
+          echo "Error: failed to clone table '$table'. Dropping incomplete database '$target'." >&2
+          ch_exec "DROP DATABASE IF EXISTS \"$target\"" 2>/dev/null || true
+          return 1
+        fi
+        ;;
+    esac
+  done <<< "$table_info"
 }
 
 ch_drop_db() {
@@ -184,25 +232,40 @@ ch_backup_worktree_dbs() {
     local db_backup_dir="${backup_subdir}/${dbname}.ch"
     mkdir -p "$db_backup_dir"
 
-    local tables
-    tables=$(ch_exec "SHOW TABLES FROM \"$dbname\"")
-    if [[ -z "$tables" ]]; then
+    local table_info
+    table_info=$(_ch_list_objects "$dbname")
+    if [[ -z "$table_info" ]]; then
       echo "  '$dbname': no tables to backup."
       continue
     fi
 
-    while IFS= read -r table; do
+    while IFS=$'\t' read -r table engine; do
       [[ -z "$table" ]] && continue
       # Save schema
       ch_exec "SHOW CREATE TABLE \"$dbname\".\"$table\" FORMAT TabSeparatedRaw" \
         > "${db_backup_dir}/${table}.sql"
-      # Save data in Native format (compact binary)
-      ch_exec "SELECT * FROM \"$dbname\".\"$table\" FORMAT Native" \
-        > "${db_backup_dir}/${table}.native"
-      local size
-      size=$(du -h "${db_backup_dir}/${table}.native" | cut -f1)
-      echo "  ${dbname}.${table} (${size})"
-    done <<< "$tables"
+
+      # Views have no storage; TO-clause MVs route data to another table.
+      # Only export data for objects that own their rows.
+      local skip_data=false
+      if [[ "$engine" == "View" ]]; then
+        skip_data=true
+      elif [[ "$engine" == "MaterializedView" ]]; then
+        local create_sql
+        create_sql=$(<"${db_backup_dir}/${table}.sql")
+        _ch_mv_routes_to_table "$create_sql" && skip_data=true
+      fi
+
+      if $skip_data; then
+        echo "  ${dbname}.${table} ($engine, schema only)"
+      else
+        ch_exec "SELECT * FROM \"$dbname\".\"$table\" FORMAT Native" \
+          > "${db_backup_dir}/${table}.native"
+        local size
+        size=$(du -h "${db_backup_dir}/${table}.native" | cut -f1)
+        echo "  ${dbname}.${table} (${size})"
+      fi
+    done <<< "$table_info"
   done
 }
 
@@ -231,9 +294,21 @@ ch_restore_worktree_dbs() {
     echo "Creating '$dbname'..."
     ch_exec "CREATE DATABASE \"$dbname\""
 
-    # Restore each table
+    # Sort schema files so tables are restored before views and materialized
+    # views (which may depend on them).
+    local schema_tables=() schema_views=() schema_mvs=()
     for schema_file in "$db_backup_dir"/*.sql; do
       [[ -f "$schema_file" ]] || continue
+      local first_line
+      read -r first_line < "$schema_file"
+      case "$first_line" in
+        *"MATERIALIZED VIEW"*) schema_mvs+=("$schema_file") ;;
+        *"CREATE VIEW"*)       schema_views+=("$schema_file") ;;
+        *)                     schema_tables+=("$schema_file") ;;
+      esac
+    done
+
+    for schema_file in "${schema_tables[@]}" "${schema_views[@]}" "${schema_mvs[@]}"; do
       local table
       table=$(basename "$schema_file" .sql)
       local data_file="${db_backup_dir}/${table}.native"

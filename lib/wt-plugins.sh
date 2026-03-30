@@ -14,12 +14,16 @@
 #   ps_header                          — return column header name (no args)
 #   ps_data   <wt_id>                  — return column value for wt ps
 #
-# .wtrc format (shell-sourceable, committed to repo root):
-#   WT_PLUGINS=(postgres clickhouse)
-#   WT_POSTGRES_DB_PREFIXES=(platform vector)
-#   WT_CLICKHOUSE_DB_PREFIXES=(analytics)
+# .wtrc variables (shell-sourceable, committed to repo root):
+#   WT_PLUGINS=(postgres clickhouse)           — active plugins (required)
+#   WT_POSTGRES_DB_PREFIXES=(platform vector)  — Postgres DB prefixes per worktree
+#   WT_CLICKHOUSE_DB_PREFIXES=(analytics)      — ClickHouse DB prefixes per worktree
+#   WT_POST_CREATE="<cmd>"                     — run after DBs cloned & .env written
+#                                                (fires on wt create and wt db-init)
 
 WT_PLUGINS=()
+# shellcheck disable=SC2034  # read by bin/wt
+WT_POST_CREATE=""
 WT_BACKUP_DIR="${HOME}/.local/share/wt-backups"
 
 # Sanitize a name for use as a database/directory identifier.

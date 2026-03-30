@@ -348,7 +348,7 @@ COMMANDS
 
     Create a new worktree with the next available wtN identifier. A branch
     name is required — the worktree checks out or creates that branch, copies
-    .env from main, clones databases, and runs scripts/setup.sh if present.
+    .env from main, clones databases, and runs WT_POST_CREATE if set in .wtrc.
     Use --detach for a detached HEAD worktree.
 
     Examples:
@@ -481,6 +481,19 @@ PLUGINS
   Without a .wtrc, no plugins are loaded and no databases are managed.
   Available plugins: postgres, clickhouse.
 
+POST-CREATE HOOK
+
+  Set WT_POST_CREATE in .wtrc to run a command after databases are cloned
+  and .env is written. The command runs in the worktree directory with the
+  worktree's .env already in place. Fires on both 'wt create' and 'wt db-init'.
+
+  This is useful for project-specific setup that must follow database cloning,
+  such as applying schema migrations that haven't reached the main branch yet.
+
+  Example:
+
+    WT_POST_CREATE="tsx ./tools/clickhouse/cli.ts detect-drift --auto-apply-schema-migrations"
+
 COMPANION TOOL: db-worktree
 
   db-worktree manages PostgreSQL databases independently of git worktrees.
@@ -502,7 +515,8 @@ DATABASE MANAGEMENT
     Create databases and update database env vars for existing worktrees.
     Useful after adding a new plugin to .wtrc — it creates any missing
     databases and writes the plugin's env vars into .env without touching
-    PORT, NEXT_PUBLIC_*, or other non-database vars.
+    PORT, NEXT_PUBLIC_*, or other non-database vars. Also runs
+    WT_POST_CREATE if set (e.g. schema migrations).
 
     With no argument, operates on the current worktree. Use --all to
     initialize all worktrees.
@@ -679,6 +693,13 @@ cmd_create() {
 
   # Configure Claude MCP for worktree database
   configure_claude_mcp "$wt_dir" "$wt_id"
+
+  # Run project-specific post-create command (e.g. schema migrations)
+  if [[ -n "${WT_POST_CREATE:-}" ]]; then
+    echo ""
+    echo -e "${BOLD}Running post-create...${NC}"
+    (cd "$wt_dir" && eval "$WT_POST_CREATE")
+  fi
 
   # Track branch in Graphite
   if [[ -n "$branch" ]] && command -v gt &>/dev/null; then
@@ -1529,6 +1550,10 @@ cmd_db_init() {
     if [[ -f "$env_file" ]]; then
       wt_dispatch_hook env "$env_file" "$wt_id"
       echo -e "${GREEN}Updated database env vars${NC}"
+    fi
+    if [[ -n "${WT_POST_CREATE:-}" ]]; then
+      echo -e "${BOLD}Running post-create...${NC}"
+      (cd "$wt_dir" && eval "$WT_POST_CREATE")
     fi
     echo ""
   done
