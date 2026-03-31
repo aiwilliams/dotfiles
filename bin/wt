@@ -19,6 +19,7 @@
 #   wt proxy [options] [N|off]           Route HTTPS proxy to a worktree
 #   wt ngrok [N|wtN|off]                Tunnel a worktree's port via ngrok
 #   wt ps [--all]                       Show running processes for current worktree
+#   wt kill [N|wtN|main]                Kill Next.js and Inngest for a worktree
 #   wt db-backup [label]                Backup current worktree's databases
 #   wt db-restore [timestamp]           Restore databases from a backup
 
@@ -315,6 +316,7 @@ Commands:
   db-status                      Show database status for current worktree
   db-backup [label]              Backup current worktree's databases (optional label)
   db-restore [timestamp]         Restore databases from a backup (fzf picker if no arg)
+  kill [N|wtN|main]              Kill Next.js and Inngest processes for a worktree
   help                           Show detailed documentation
 EOF
   exit 1
@@ -464,6 +466,16 @@ COMMANDS
     Examples:
       wt ps              # current worktree
       wt ps --all        # all worktrees
+
+  wt kill [N|wtN|main]
+
+    Kill the Next.js and Inngest dev processes for a worktree. Sends SIGTERM
+    to the process group and waits for a clean exit before force-killing.
+
+    Examples:
+      wt kill 3              # kill processes for wt3
+      wt kill wt3            # same thing
+      wt kill main           # kill processes for the main worktree
 
   wt help
 
@@ -2100,6 +2112,95 @@ cmd_ps() {
   }
 }
 
+# --- Kill dev processes ---
+
+# Kill a process and its entire process group.
+# Sends SIGTERM to the process group, waits briefly, then SIGKILL if needed.
+_kill_proc_tree() {
+  local pid="$1" label="$2"
+  local pgid
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || return
+
+  echo -e "  ${label}: killing process group (pgid ${pgid})"
+  kill -- -"$pgid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+
+  # Wait briefly for clean exit, then force-kill
+  local i
+  for i in 1 2 3; do
+    kill -0 "$pid" 2>/dev/null || return
+    sleep 0.5
+  done
+  kill -9 -- -"$pgid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+}
+
+# Find the pnpm dev:inngest parent process for a worktree (for killing, not the leaf)
+_kill_find_inngest_parent() {
+  local wt_dir="$1"
+  local pids pid cwd
+  pids=$(pgrep -f 'pnpm dev:inngest' 2>/dev/null || true)
+  [[ -z "$pids" ]] && return
+  while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
+    if [[ "$cwd" == "$wt_dir" || "$cwd" == "$wt_dir"/* ]]; then
+      echo "$pid"
+      return
+    fi
+  done <<< "$pids"
+}
+
+cmd_kill() {
+  local arg="${1:-}"
+
+  if [[ -z "$arg" ]]; then
+    echo -e "${RED}Usage: wt kill [N|wtN|main]${NC}"
+    exit 1
+  fi
+
+  local wt_dir
+
+  if [[ "$arg" == "main" ]]; then
+    wt_dir=$(main_worktree_dir)
+  else
+    local n="${arg#wt}"
+    if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+      echo -e "${RED}Invalid worktree identifier: ${arg}${NC}"
+      echo "Usage: wt kill [N|wtN|main]"
+      exit 1
+    fi
+    wt_dir=$(worktree_dir_for_number "$n")
+  fi
+
+  if [[ ! -d "$wt_dir" ]]; then
+    echo -e "${RED}Worktree directory not found: ${wt_dir}${NC}"
+    exit 1
+  fi
+
+  local killed=0
+
+  # Kill Next.js
+  local next_pid
+  next_pid=$(_ps_find_next_server "$wt_dir")
+  if [[ -n "$next_pid" ]]; then
+    _kill_proc_tree "$next_pid" "Next.js"
+    (( ++killed ))
+  fi
+
+  # Kill Inngest
+  local inngest_pid
+  inngest_pid=$(_kill_find_inngest_parent "$wt_dir")
+  if [[ -n "$inngest_pid" ]]; then
+    _kill_proc_tree "$inngest_pid" "Inngest"
+    (( ++killed ))
+  fi
+
+  if (( killed == 0 )); then
+    echo "No running processes found for ${arg}."
+  else
+    echo -e "${GREEN}Done.${NC}"
+  fi
+}
+
 # --- Main dispatch ---
 
 ensure_in_repo
@@ -2127,6 +2228,7 @@ case "$command" in
   db-restore) cmd_db_restore "$@" ;;
   merged)     cmd_merged ;;
   ps)         cmd_ps "$@" ;;
+  kill)        cmd_kill "$@" ;;
   help)       cmd_help ;;
   *)          echo "Unknown command: $command"; usage ;;
 esac
