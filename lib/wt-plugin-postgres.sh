@@ -6,7 +6,7 @@
 
 if [[ ${#WT_POSTGRES_DB_PREFIXES[@]} -eq 0 ]]; then
   echo "Error: postgres plugin requires WT_POSTGRES_DB_PREFIXES in .wtrc" >&2
-  exit 1
+  return 1
 fi
 
 # shellcheck source=./postgres.sh

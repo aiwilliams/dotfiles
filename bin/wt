@@ -20,6 +20,7 @@
 #   wt ngrok [N|wtN|off]                Tunnel a worktree's port via ngrok
 #   wt ps [--all]                       Show running processes for current worktree
 #   wt kill [N|wtN|main]                Kill Next.js and Inngest for a worktree
+#   wt status                           Show project config, services, and database state
 #   wt db-backup [label]                Backup current worktree's databases
 #   wt db-restore [timestamp]           Restore databases from a backup
 
@@ -289,7 +290,37 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m'
+
+# --------------------------------------------------------------------------
+# Helpers — plugin checks
+# --------------------------------------------------------------------------
+
+# Print a warning that no database plugins are configured, with guidance.
+# Returns 1 so callers can use: warn_no_plugins && return
+warn_no_plugins() {
+  [[ ${#WT_PLUGINS[@]} -gt 0 ]] && return 1
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  local wtrc="${main_dir}/.wtrc"
+  echo -e "${YELLOW}No database plugins configured.${NC}"
+  echo ""
+  echo "  wt uses plugins to manage per-worktree databases. Plugins are"
+  echo "  declared in a .wtrc file in the main worktree root:"
+  echo ""
+  echo -e "    ${DIM}${wtrc}${NC}"
+  echo ""
+  echo "  Example .wtrc:"
+  echo ""
+  echo "    WT_PLUGINS=(postgres clickhouse)"
+  echo "    WT_POSTGRES_DB_PREFIXES=(myapp)"
+  echo "    WT_CLICKHOUSE_DB_PREFIXES=(analytics)"
+  echo ""
+  echo "  Available plugins: postgres, clickhouse."
+  echo "  Run 'wt help' for full documentation."
+  return 0
+}
 
 # --------------------------------------------------------------------------
 # Commands
@@ -312,6 +343,7 @@ Commands:
   proxy [options] [N|wtN|off]    Route HTTPS proxy to a worktree (show current if no arg)
   ngrok [options] [N|wtN|off]    Tunnel a worktree's port via ngrok (show status if no arg)
   merged                         Show worktrees whose branch PR has been merged
+  status                         Show project config, services, and database state
   db-init [--all]                Create databases and update env vars for existing worktrees
   db-status                      Show database status for current worktree
   db-backup [label]              Backup current worktree's databases (optional label)
@@ -476,6 +508,14 @@ COMMANDS
       wt kill 3              # kill processes for wt3
       wt kill wt3            # same thing
       wt kill main           # kill processes for the main worktree
+
+  wt status
+
+    Show an overview of the current project's wt configuration: worktree
+    identity, .wtrc plugin configuration, whether required services
+    (PostgreSQL, ClickHouse) are running, .env presence, and database
+    details from active plugins. This is the best starting point when
+    something isn't working or after setting up a new machine.
 
   wt help
 
@@ -1518,7 +1558,115 @@ cmd_switch() {
   fi
 }
 
+cmd_status() {
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  local wt_id
+  wt_id=$(current_worktree_id)
+  local wtrc="${main_dir}/.wtrc"
+  local env_file
+  env_file=$(env_file_for "$(git rev-parse --show-toplevel)")
+
+  echo -e "${BOLD}wt status for ${wt_id}${NC}"
+  echo ""
+
+  # Worktree info
+  echo -e "${BOLD}Worktree${NC}"
+  echo "  ID:        $wt_id"
+  echo "  Directory: $(git rev-parse --show-toplevel)"
+  echo "  Branch:    $(git rev-parse --abbrev-ref HEAD)"
+  echo "  Main:      $main_dir"
+  echo ""
+
+  # .wtrc / plugins — read directly without wt_load_plugins so status works
+  # even when plugin prerequisites are missing.
+  local -a status_plugins=()
+  echo -e "${BOLD}Plugins${NC}"
+  if [[ -f "$wtrc" ]]; then
+    # Source .wtrc for WT_PLUGINS without loading plugin files.
+    local WT_PLUGINS=()
+    # shellcheck source=/dev/null
+    source "$wtrc" 2>/dev/null || true
+    status_plugins=("${WT_PLUGINS[@]}")
+    echo -e "  .wtrc:     ${GREEN}found${NC} ${DIM}(${wtrc})${NC}"
+    if [[ ${#status_plugins[@]} -gt 0 ]]; then
+      echo "  Active:    ${status_plugins[*]}"
+    else
+      echo -e "  Active:    ${YELLOW}none — WT_PLUGINS is empty in .wtrc${NC}"
+    fi
+  else
+    echo -e "  .wtrc:     ${YELLOW}not found${NC}"
+    echo -e "  ${DIM}Create ${wtrc} to enable database plugins.${NC}"
+    echo -e "  ${DIM}Run 'wt help' and see the PLUGINS section.${NC}"
+  fi
+  echo ""
+
+  # Services — check based on configured plugins
+  echo -e "${BOLD}Services${NC}"
+  local has_pg=false has_ch=false
+  if [[ ${#status_plugins[@]} -gt 0 ]]; then
+    for p in "${status_plugins[@]}"; do
+      [[ "$p" == "postgres" ]] && has_pg=true
+      [[ "$p" == "clickhouse" ]] && has_ch=true
+    done
+  fi
+
+  if $has_pg; then
+    if command -v psql &>/dev/null; then
+      if PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -tAc "SELECT 1" &>/dev/null; then
+        local pg_version
+        pg_version=$(PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -tAc "SHOW server_version;" 2>/dev/null) || pg_version="unknown"
+        echo -e "  PostgreSQL: ${GREEN}running${NC} (${pg_version})"
+      else
+        echo -e "  PostgreSQL: ${RED}not responding${NC} on localhost:5432"
+      fi
+    else
+      echo -e "  PostgreSQL: ${RED}psql not found${NC} — brew install postgresql"
+    fi
+  fi
+
+  if $has_ch; then
+    if command -v clickhouse &>/dev/null; then
+      if clickhouse client --host localhost --port 9000 -q "SELECT 1" &>/dev/null; then
+        local ch_version
+        ch_version=$(clickhouse client --host localhost --port 9000 -q "SELECT version()" 2>/dev/null) || ch_version="unknown"
+        echo -e "  ClickHouse: ${GREEN}running${NC} (${ch_version})"
+      else
+        echo -e "  ClickHouse: ${RED}not responding${NC} on localhost:9000"
+      fi
+    else
+      echo -e "  ClickHouse: ${YELLOW}not installed${NC} — brew install clickhouse"
+    fi
+  fi
+
+  if ! $has_pg && ! $has_ch; then
+    echo -e "  ${DIM}No database plugins configured.${NC}"
+  fi
+  echo ""
+
+  # .env
+  echo -e "${BOLD}Environment${NC}"
+  if [[ -f "$env_file" ]]; then
+    echo -e "  .env:      ${GREEN}found${NC} ${DIM}(${env_file})${NC}"
+  else
+    echo -e "  .env:      ${YELLOW}not found${NC} ${DIM}(${env_file})${NC}"
+  fi
+  echo ""
+
+  # Database details — try loading plugins; skip if prerequisites are missing.
+  if [[ ${#status_plugins[@]} -gt 0 ]]; then
+    echo -e "${BOLD}Databases${NC}"
+    if wt_load_plugins "$main_dir"; then
+      wt_dispatch_hook status "$wt_id"
+    fi
+  fi
+}
+
 cmd_db_init() {
+  if warn_no_plugins; then
+    return
+  fi
+
   local do_all=false
   [[ "${1:-}" == "--all" ]] && do_all=true
 
@@ -1572,6 +1720,10 @@ cmd_db_init() {
 }
 
 cmd_db_status() {
+  if warn_no_plugins; then
+    return
+  fi
+
   local wt_id
   wt_id=$(current_worktree_id)
 
@@ -2204,12 +2356,19 @@ cmd_kill() {
 # --- Main dispatch ---
 
 ensure_in_repo
-wt_load_plugins "$(main_worktree_dir)"
 
 [[ $# -lt 1 ]] && { cmd_help; exit 0; }
 
 command="$1"
 shift
+
+# 'status' runs before plugin loading so it can diagnose config issues.
+if [[ "$command" == "status" ]]; then
+  cmd_status
+  exit 0
+fi
+
+wt_load_plugins "$(main_worktree_dir)" || exit 1
 
 case "$command" in
   create)     cmd_create "$@" ;;

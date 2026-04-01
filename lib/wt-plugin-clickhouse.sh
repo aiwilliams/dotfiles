@@ -6,12 +6,12 @@
 
 if ! command -v clickhouse &>/dev/null; then
   echo "Error: clickhouse plugin requires 'clickhouse' client. Install: https://clickhouse.com/docs/install" >&2
-  exit 1
+  return 1
 fi
 
 if [[ ${#WT_CLICKHOUSE_DB_PREFIXES[@]} -eq 0 ]]; then
   echo "Error: clickhouse plugin requires WT_CLICKHOUSE_DB_PREFIXES in .wtrc" >&2
-  exit 1
+  return 1
 fi
 
 # shellcheck source=./clickhouse.sh

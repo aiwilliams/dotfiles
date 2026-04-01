@@ -87,23 +87,25 @@ wt_load_plugins() {
     fi
   fi
 
-  local missing=0
+  local failed=0
   if [[ ${#WT_PLUGINS[@]} -gt 0 ]]; then
     for plugin in "${WT_PLUGINS[@]}"; do
       local plugin_file="${LIB_DIR}/wt-plugin-${plugin}.sh"
       if [[ -f "$plugin_file" ]]; then
         # shellcheck source=/dev/null
-        source "$plugin_file"
+        if ! source "$plugin_file"; then
+          failed=1
+        fi
       else
         echo "Error: plugin '${plugin}' not found at ${plugin_file}" >&2
-        missing=1
+        failed=1
       fi
     done
   fi
 
-  if (( missing )); then
-    echo "Fix WT_PLUGINS in ${wtrc} or install the missing plugin files." >&2
-    exit 1
+  if (( failed )); then
+    echo "Fix WT_PLUGINS in ${wtrc} or install the missing prerequisites." >&2
+    return 1
   fi
 }
 
