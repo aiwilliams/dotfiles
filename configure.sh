@@ -114,7 +114,13 @@ echo "Installed pre-commit hook"
 # Claude Code statusline
 mkdir -p "$HOME/.claude"
 ln -sf "$SCRIPT_DIR/config/claude/statusline-command.sh" "$HOME/.claude/statusline-command.sh"
-echo "Symlinked statusline-command.sh to ~/.claude/"
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+if [ ! -f "$CLAUDE_SETTINGS" ]; then
+  echo '{}' > "$CLAUDE_SETTINGS"
+fi
+jq '.statusLine = {"type": "command", "command": "bash ~/.claude/statusline-command.sh"}' \
+  "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+echo "Configured Claude Code statusline"
 
 # Claude Code MCP servers
 source "$SCRIPT_DIR/lib/claude-mcp.sh"
