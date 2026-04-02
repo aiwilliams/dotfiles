@@ -1635,7 +1635,7 @@ cmd_status() {
         echo -e "  ClickHouse: ${RED}not responding${NC} on localhost:9000"
       fi
     else
-      echo -e "  ClickHouse: ${YELLOW}not installed${NC} — brew install clickhouse"
+      echo -e "  ClickHouse: ${YELLOW}not installed${NC} — see https://clickhouse.com/docs/install"
     fi
   fi
 
