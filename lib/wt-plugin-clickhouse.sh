@@ -35,6 +35,19 @@ wtp_clickhouse_env() {
   ch_apply_env "$env_file" "$wt_id"
 }
 
+wtp_clickhouse_agent_env() {
+  local agent_env_file="$1"
+  local wt_id="$2"
+  local sanitized
+  sanitized=$(ch_sanitize_branch_name "$wt_id")
+  cat >> "$agent_env_file" <<EOF
+CLICKHOUSE_URL="http://${CH_HOST}:${CH_HTTP_PORT}"
+CLICKHOUSE_USERNAME="default"
+CLICKHOUSE_PASSWORD=""
+CLICKHOUSE_DATABASE="${CH_DB_PREFIXES[0]}_${sanitized}"
+EOF
+}
+
 wtp_clickhouse_backup() {
   local wt_id="$1"
   local backup_subdir="$2"

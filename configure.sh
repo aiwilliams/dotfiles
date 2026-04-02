@@ -107,6 +107,16 @@ if [ "$(uname -s)" = "Linux" ]; then
   fi
 fi
 
+# Global gitignore
+GLOBAL_GITIGNORE="$HOME/.config/git/ignore"
+mkdir -p "$(dirname "$GLOBAL_GITIGNORE")"
+for pattern in .env.agent .mise.local.toml .wtrc; do
+  if [ ! -f "$GLOBAL_GITIGNORE" ] || ! grep -qxF "$pattern" "$GLOBAL_GITIGNORE"; then
+    echo "$pattern" >> "$GLOBAL_GITIGNORE"
+  fi
+done
+echo "Configured global gitignore ($GLOBAL_GITIGNORE)"
+
 # Pre-commit hook
 ln -sf "$SCRIPT_DIR/hooks/pre-commit" "$SCRIPT_DIR/.git/hooks/pre-commit"
 echo "Installed pre-commit hook"

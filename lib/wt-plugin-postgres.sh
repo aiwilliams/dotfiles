@@ -30,6 +30,15 @@ wtp_postgres_env() {
   pg_apply_env "$env_file" "$wt_id"
 }
 
+wtp_postgres_agent_env() {
+  local agent_env_file="$1"
+  local wt_id="$2"
+  local sanitized
+  sanitized=$(pg_sanitize_branch_name "$wt_id")
+  local user="$sanitized"
+  echo "POSTGRES_URL=\"postgresql://${user}:${user}@localhost:${PG_PORT}/platform_${sanitized}\"" >> "$agent_env_file"
+}
+
 wtp_postgres_backup() {
   local wt_id="$1"
   local backup_subdir="$2"
