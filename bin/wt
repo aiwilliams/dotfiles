@@ -1560,8 +1560,10 @@ cmd_status() {
   local wt_id
   wt_id=$(current_worktree_id)
   local wtrc="${main_dir}/.wtrc"
+  local wt_dir
+  wt_dir=$(git rev-parse --show-toplevel)
   local env_file
-  env_file=$(env_file_for "$(git rev-parse --show-toplevel)")
+  env_file=$(env_file_for "$wt_dir")
 
   echo -e "${BOLD}wt status for ${wt_id}${NC}"
   echo ""
@@ -1569,7 +1571,7 @@ cmd_status() {
   # Worktree info
   echo -e "${BOLD}Worktree${NC}"
   echo "  ID:        $wt_id"
-  echo "  Directory: $(git rev-parse --show-toplevel)"
+  echo "  Directory: $wt_dir"
   echo "  Branch:    $(git rev-parse --abbrev-ref HEAD)"
   echo "  Main:      $main_dir"
   echo ""
@@ -1643,9 +1645,42 @@ cmd_status() {
   # .env
   echo -e "${BOLD}Environment${NC}"
   if [[ -f "$env_file" ]]; then
-    echo -e "  .env:      ${GREEN}found${NC} ${DIM}(${env_file})${NC}"
+    echo -e "  .env:            ${GREEN}found${NC} ${DIM}(${env_file})${NC}"
   else
-    echo -e "  .env:      ${YELLOW}not found${NC} ${DIM}(${env_file})${NC}"
+    echo -e "  .env:            ${YELLOW}not found${NC} ${DIM}(${env_file})${NC}"
+  fi
+
+  # Agent env — .env.agent + .mise.local.toml wiring
+  local agent_env_file="${wt_dir}/.env.agent"
+  local mise_local="${wt_dir}/.mise.local.toml"
+  if [[ -f "$agent_env_file" ]]; then
+    if [[ -s "$agent_env_file" ]]; then
+      echo -e "  .env.agent:      ${GREEN}found${NC} ${DIM}(${agent_env_file})${NC}"
+    else
+      echo -e "  .env.agent:      ${YELLOW}empty${NC} ${DIM}(${agent_env_file})${NC}"
+    fi
+  else
+    echo -e "  .env.agent:      ${YELLOW}not found${NC} — run 'wt agent-env' or 'wt db-init'"
+  fi
+  if [[ -f "$mise_local" ]]; then
+    if grep -qF '.env.agent' "$mise_local"; then
+      echo -e "  .mise.local.toml: ${GREEN}found${NC} ${DIM}(loads .env.agent)${NC}"
+    else
+      echo -e "  .mise.local.toml: ${YELLOW}found but missing .env.agent reference${NC}"
+    fi
+  else
+    echo -e "  .mise.local.toml: ${YELLOW}not found${NC} — run 'wt agent-env' or 'wt db-init'"
+  fi
+  if command -v mise &>/dev/null; then
+    if [[ -f "$mise_local" ]]; then
+      if mise trust --show 2>/dev/null | grep -qF "$mise_local"; then
+        echo -e "  mise trust:      ${GREEN}trusted${NC}"
+      else
+        echo -e "  mise trust:      ${YELLOW}not trusted${NC} — run 'mise trust ${mise_local}'"
+      fi
+    fi
+  elif [[ -f "$mise_local" ]]; then
+    echo -e "  mise:            ${RED}not installed${NC} — .mise.local.toml exists but mise is not on PATH"
   fi
   echo ""
 
