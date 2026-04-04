@@ -2123,13 +2123,15 @@ _ps_abbrev_path() {
 _ps_proc_summary() {
   local pid="$1"
   local rss _pct etime
-  read -r rss _pct etime < <(ps -o rss=,%mem=,etime= -p "$pid" --no-headers 2>/dev/null) || return
+  # Note: trailing = in format specifiers suppresses headers on both macOS and Linux.
+  # Do NOT use --no-headers (Linux-only, fails silently on macOS).
+  read -r rss _pct etime < <(ps -o rss=,%mem=,etime= -p "$pid" 2>/dev/null) || return
 
   # Total RSS including children
   local total_rss=$rss child_rss cpid
   while IFS= read -r cpid; do
     [[ -z "$cpid" ]] && continue
-    child_rss=$(ps -o rss= -p "$cpid" --no-headers 2>/dev/null) || continue
+    child_rss=$(ps -o rss= -p "$cpid" 2>/dev/null) || continue
     total_rss=$((total_rss + child_rss))
   done < <(pgrep -P "$pid" 2>/dev/null)
 
@@ -2143,16 +2145,55 @@ _ps_proc_summary() {
   echo "${mem} ${etime}"
 }
 
-# Find a next-server process whose cwd is within the given directory
+# Get the current working directory of a process (works on both macOS and Linux)
+_cwd_for_pid() {
+  local pid="$1"
+  # Linux: /proc is available
+  if [[ -d /proc/$pid ]]; then
+    readlink "/proc/$pid/cwd" 2>/dev/null && return
+  fi
+  # macOS: use lsof
+  lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | grep '^n' | sed 's/^n//' | head -1
+}
+
+# Check if a process's cwd is within the given directory
+_pid_belongs_to_dir() {
+  local pid="$1" wt_dir="$2"
+  local cwd
+  cwd=$(_cwd_for_pid "$pid")
+  [[ -z "$cwd" ]] && return 1
+  [[ "$cwd" == "$wt_dir" || "$cwd" == "$wt_dir"/* ]]
+}
+
+# Find the dev server process for a worktree.
+# Strategy: find whatever is listening on the worktree's port, then verify
+# it's a node process whose cwd is within the worktree directory.
+# Falls back to pgrep for next-server if port detection finds nothing.
 _ps_find_next_server() {
-  local wt_dir="$1"
-  local pids pid cwd
+  local wt_dir="$1" port="${2:-}"
+  local pid
+
+  # Primary: find the process listening on the configured port
+  if [[ -n "$port" && "$port" != "?" ]]; then
+    pid=$(lsof -i :"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
+    if [[ -n "$pid" ]]; then
+      # Verify it's a node process belonging to this worktree
+      local cmd
+      cmd=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+      if [[ "$cmd" == "node" || "$cmd" == "next-server"* ]] && _pid_belongs_to_dir "$pid" "$wt_dir"; then
+        echo "$pid"
+        return
+      fi
+    fi
+  fi
+
+  # Fallback: pgrep for next-server by name (original approach, now with working cwd check)
+  local pids
   pids=$(pgrep -f '^next-server ' 2>/dev/null || true)
   [[ -z "$pids" ]] && return
   while IFS= read -r pid; do
     [[ -z "$pid" ]] && continue
-    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
-    if [[ "$cwd" == "$wt_dir" || "$cwd" == "$wt_dir"/* ]]; then
+    if _pid_belongs_to_dir "$pid" "$wt_dir"; then
       echo "$pid"
       return
     fi
@@ -2164,13 +2205,12 @@ _ps_find_next_server() {
 # inngest binary for accurate resource measurement.
 _ps_find_inngest() {
   local wt_dir="$1"
-  local pids pid cwd
+  local pids pid
   pids=$(pgrep -f 'pnpm dev:inngest' 2>/dev/null || true)
   [[ -z "$pids" ]] && return
   while IFS= read -r pid; do
     [[ -z "$pid" ]] && continue
-    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
-    if [[ "$cwd" == "$wt_dir" || "$cwd" == "$wt_dir"/* ]]; then
+    if _pid_belongs_to_dir "$pid" "$wt_dir"; then
       # Find the leaf inngest binary for accurate resource info
       local leaf="$pid"
       local children
@@ -2261,9 +2301,9 @@ cmd_ps() {
 
     display_dir=$(_ps_abbrev_path "$wt")
 
-    # next-server
+    # next-server (pass port for port-based detection)
     local next_pid
-    next_pid=$(_ps_find_next_server "$wt")
+    next_pid=$(_ps_find_next_server "$wt" "$port")
     if [[ -n "$next_pid" ]]; then
       next_info=$(_ps_proc_summary "$next_pid")
     else
@@ -2319,13 +2359,12 @@ _kill_proc_tree() {
 # Find the pnpm dev:inngest parent process for a worktree (for killing, not the leaf)
 _kill_find_inngest_parent() {
   local wt_dir="$1"
-  local pids pid cwd
+  local pids pid
   pids=$(pgrep -f 'pnpm dev:inngest' 2>/dev/null || true)
   [[ -z "$pids" ]] && return
   while IFS= read -r pid; do
     [[ -z "$pid" ]] && continue
-    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
-    if [[ "$cwd" == "$wt_dir" || "$cwd" == "$wt_dir"/* ]]; then
+    if _pid_belongs_to_dir "$pid" "$wt_dir"; then
       echo "$pid"
       return
     fi
@@ -2359,14 +2398,23 @@ cmd_kill() {
     exit 1
   fi
 
+  # Determine port for this worktree
+  local port
+  if [[ "$arg" == "main" ]]; then
+    port="3000"
+  else
+    local n="${arg#wt}"
+    port=$((3000 + n))
+  fi
+
   local killed=0
 
-  # Kill Next.js
+  # Kill Next.js / dev server
   local next_pid
-  next_pid=$(_ps_find_next_server "$wt_dir")
+  next_pid=$(_ps_find_next_server "$wt_dir" "$port")
   if [[ -n "$next_pid" ]]; then
     _kill_proc_tree "$next_pid" "Next.js"
-    (( ++killed ))
+    killed=$((killed + 1))
   fi
 
   # Kill Inngest
@@ -2374,7 +2422,7 @@ cmd_kill() {
   inngest_pid=$(_kill_find_inngest_parent "$wt_dir")
   if [[ -n "$inngest_pid" ]]; then
     _kill_proc_tree "$inngest_pid" "Inngest"
-    (( ++killed ))
+    killed=$((killed + 1))
   fi
 
   if (( killed == 0 )); then
