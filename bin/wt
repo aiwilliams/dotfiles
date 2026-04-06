@@ -198,6 +198,7 @@ compute_port() {
 
 # Write .env.agent with agent-visible env vars from all plugins.
 # Also writes .mise.local.toml so mise loads .env.agent automatically.
+# Ensures ~/projects/private/dbhub.private.toml has a source for this project.
 write_agent_env() {
   local wt_dir="$1"
   local wt_id="$2"
@@ -213,6 +214,38 @@ write_agent_env() {
   if command -v mise &>/dev/null; then
     mise trust --quiet "$mise_local" 2>/dev/null || true
   fi
+
+  ensure_dbhub_config
+}
+
+# Ensure ~/projects/private/dbhub.private.toml has a [[sources]] entry for
+# this project (local-dev-<repo_name>). Creates the file if missing.
+ensure_dbhub_config() {
+  local dbhub_config="$HOME/projects/private/dbhub.private.toml"
+  local source_id="local-dev-$(repo_name)"
+
+  if [[ -f "$dbhub_config" ]] && grep -qF "id = \"${source_id}\"" "$dbhub_config"; then
+    return
+  fi
+
+  mkdir -p "$(dirname "$dbhub_config")"
+  # Append separator if file already has content
+  [[ -f "$dbhub_config" ]] && [[ -s "$dbhub_config" ]] && echo >> "$dbhub_config"
+  cat >> "$dbhub_config" <<EOF
+[[sources]]
+id = "${source_id}"
+dsn = "\${POSTGRES_URL}"
+query_timeout = 5
+connection_timeout = 10
+lazy = true
+
+[[tools]]
+name = "execute_sql"
+source = "${source_id}"
+readonly = true
+max_rows = 200
+EOF
+  echo -e "${GREEN}Added ${source_id} to dbhub config${NC} ${DIM}(${dbhub_config})${NC}"
 }
 
 # Update PORT, NEXT_PUBLIC_HOST, NEXT_PUBLIC_SITE_URL, and plugin-managed vars in a .env file.
@@ -443,9 +476,10 @@ COMMANDS
 
   wt agent-env
 
-    Configure (or reconfigure) the Claude MCP dbhub server for the current
-    worktree's database. Idempotent — safe to run multiple times. Must be
-    run from inside a numbered worktree directory.
+    Write .env.agent with plugin-provided agent env vars (e.g. POSTGRES_URL,
+    CLICKHOUSE_URL) and create .mise.local.toml to load them. Idempotent —
+    safe to run multiple times. Must be run from inside a numbered worktree
+    directory.
 
   wt proxy [--host <host>] [--domain <domain>] [N|wtN|off]
 
@@ -1681,6 +1715,22 @@ cmd_status() {
     fi
   elif [[ -f "$mise_local" ]]; then
     echo -e "  mise:            ${RED}not installed${NC} — .mise.local.toml exists but mise is not on PATH"
+  fi
+
+  # dbhub MCP — check ~/.claude.json for mcpServers.dbhub
+  local claude_json="$HOME/.claude.json"
+  local dbhub_config="$HOME/projects/private/dbhub.private.toml"
+  if [[ -f "$claude_json" ]] && command -v python3 &>/dev/null; then
+    if python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if 'dbhub' in d.get('mcpServers',{}) else 1)" "$claude_json" 2>/dev/null; then
+      echo -e "  dbhub MCP:       ${GREEN}configured${NC} ${DIM}(${claude_json})${NC}"
+    else
+      echo -e "  dbhub MCP:       ${YELLOW}not configured${NC} — add mcpServers.dbhub to ${claude_json}"
+    fi
+  fi
+  if [[ -f "$dbhub_config" ]]; then
+    echo -e "  dbhub config:    ${GREEN}found${NC} ${DIM}(${dbhub_config})${NC}"
+  else
+    echo -e "  dbhub config:    ${YELLOW}not found${NC} ${DIM}(${dbhub_config})${NC}"
   fi
   echo ""
 

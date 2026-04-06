@@ -20,4 +20,7 @@ else
   echo "Skipping Context7 MCP: set CONTEXT7_API_KEY to enable."
 fi
 
+# Database access via dbhub (config file managed by wt agent-env)
+claude mcp add --scope user --transport stdio dbhub -- pnpm dlx @bytebase/dbhub --transport stdio --config "$HOME/projects/private/dbhub.private.toml"
+
 echo "Claude Code MCP servers configured."
