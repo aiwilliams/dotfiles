@@ -212,7 +212,7 @@ write_agent_env() {
     printf '[env]\n_.file = ".env.agent"\n' > "$mise_local"
   fi
   if command -v mise &>/dev/null; then
-    mise trust --quiet "$mise_local" 2>/dev/null || true
+    (cd "$wt_dir" && mise trust --quiet 2>/dev/null) || true
   fi
 
   ensure_dbhub_config
@@ -1707,7 +1707,7 @@ cmd_status() {
   fi
   if command -v mise &>/dev/null; then
     if [[ -f "$mise_local" ]]; then
-      if mise trust --show 2>/dev/null | grep -qF "$mise_local"; then
+      if (cd "$wt_dir" && mise trust --show 2>/dev/null) | grep -q "trusted"; then
         echo -e "  mise trust:      ${GREEN}trusted${NC}"
       else
         echo -e "  mise trust:      ${YELLOW}not trusted${NC} — run 'mise trust ${mise_local}'"
