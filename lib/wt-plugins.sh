@@ -9,6 +9,7 @@
 #   remove    <wt_id>                  — drop databases when a worktree is removed
 #   env       <env_file> <wt_id>       — write plugin-managed vars into .env
 #   agent_env <env_file> <wt_id>       — append agent-visible env vars to .env.agent
+#   clone     <wt_id> <source_wt_id>   — drop target DBs and clone from another worktree
 #   backup    <wt_id> <backup_subdir>  — dump data into the backup directory
 #   restore   <wt_id> <backup_subdir>  — restore data from a backup directory
 #   status    <wt_id>                  — print database status details

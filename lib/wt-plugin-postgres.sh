@@ -24,6 +24,13 @@ wtp_postgres_remove() {
   pg_drop_worktree_dbs "$wt_id"
 }
 
+wtp_postgres_clone() {
+  local wt_id="$1"
+  local source_wt_id="$2"
+  pg_drop_worktree_dbs "$wt_id"
+  pg_clone_worktree_dbs "$wt_id" "$source_wt_id"
+}
+
 wtp_postgres_env() {
   local env_file="$1"
   local wt_id="$2"

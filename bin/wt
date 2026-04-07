@@ -21,6 +21,7 @@
 #   wt ps [--all]                       Show running processes for current worktree
 #   wt kill [N|wtN|main]                Kill Next.js and Inngest for a worktree
 #   wt status                           Show project config, services, and database state
+#   wt db-clone <N|wtN|main>            Drop current DBs and clone from another worktree
 #   wt db-backup [label]                Backup current worktree's databases
 #   wt db-restore [timestamp]           Restore databases from a backup
 
@@ -222,7 +223,8 @@ write_agent_env() {
 # this project (local-dev-<repo_name>). Creates the file if missing.
 ensure_dbhub_config() {
   local dbhub_config="$HOME/projects/private/dbhub.private.toml"
-  local source_id="local-dev-$(repo_name)"
+  local source_id
+  source_id="local-dev-$(repo_name)"
 
   if [[ -f "$dbhub_config" ]] && grep -qF "id = \"${source_id}\"" "$dbhub_config"; then
     return
@@ -374,6 +376,7 @@ Commands:
   merged                         Show worktrees whose branch PR has been merged
   status                         Show project config, services, and database state
   db-init [--all]                Create databases and update env vars for existing worktrees
+  db-clone <N|wtN|main>          Drop current DBs and clone from another worktree
   db-status                      Show database status for current worktree
   db-backup [label]              Backup current worktree's databases (optional label)
   db-restore [timestamp]         Restore databases from a backup (fzf picker if no arg)
@@ -606,6 +609,19 @@ DATABASE MANAGEMENT
     Examples:
       wt db-init              # current worktree
       wt db-init --all        # all worktrees
+
+  wt db-clone <N|wtN|main>
+
+    Drop the current worktree's databases and clone them from another worktree.
+    Shows a summary of both source and target databases before prompting for
+    confirmation. After cloning, updates .env and runs WT_POST_CREATE if set.
+
+    The source argument accepts a worktree number (2), id (wt2), or 'main'.
+
+    Examples:
+      wt db-clone 2               # clone from wt2 into current worktree
+      wt db-clone wt2             # same as above
+      wt db-clone main            # clone from main into current worktree
 
   wt db-status
 
@@ -1801,6 +1817,94 @@ cmd_db_init() {
   done
 }
 
+cmd_db_clone() {
+  if warn_no_plugins; then
+    return
+  fi
+
+  local source_arg="${1:-}"
+  if [[ -z "$source_arg" ]]; then
+    echo "Usage: wt db-clone <N|wtN|main>"
+    echo ""
+    echo "Clone databases from another worktree into the current one."
+    echo "The current worktree's databases will be dropped and recreated."
+    return 1
+  fi
+
+  # Normalize source argument: "2" -> "wt2", "wt2" -> "wt2", "main" -> "main"
+  local source_wt_id
+  if [[ "$source_arg" == "main" ]]; then
+    source_wt_id="main"
+  elif [[ "$source_arg" =~ ^wt([0-9]+)$ ]]; then
+    source_wt_id="$source_arg"
+  elif [[ "$source_arg" =~ ^([0-9]+)$ ]]; then
+    source_wt_id="wt${source_arg}"
+  else
+    echo -e "${RED}Invalid source: '$source_arg'. Use a worktree number (2), id (wt2), or 'main'.${NC}"
+    return 1
+  fi
+
+  local wt_id
+  wt_id=$(current_worktree_id)
+
+  if [[ "$wt_id" == "$source_wt_id" ]]; then
+    echo -e "${RED}Cannot clone from a worktree into itself.${NC}"
+    return 1
+  fi
+
+  # Validate source worktree directory exists (unless main)
+  if [[ "$source_wt_id" == "main" ]]; then
+    local source_dir
+    source_dir=$(main_worktree_dir)
+  else
+    local source_num="${source_wt_id#wt}"
+    local source_dir
+    source_dir=$(worktree_dir_for_number "$source_num")
+  fi
+  if [[ ! -d "$source_dir" ]]; then
+    echo -e "${RED}Source worktree directory does not exist: $source_dir${NC}"
+    return 1
+  fi
+
+  echo -e "${BOLD}Database clone: ${source_wt_id} → ${wt_id}${NC}"
+  echo ""
+
+  echo -e "${BOLD}Source (${source_wt_id}):${NC}"
+  wt_dispatch_hook status "$source_wt_id"
+  echo ""
+
+  echo -e "${BOLD}Target (${wt_id}) — will be DROPPED and recreated:${NC}"
+  wt_dispatch_hook status "$wt_id"
+  echo ""
+
+  echo -e "${YELLOW}This will drop all databases for ${wt_id} and clone from ${source_wt_id}.${NC}"
+  read -r -p "Continue? [y/N] " confirm
+  if [[ "$confirm" != [yY] ]]; then
+    echo "Aborted."
+    return 1
+  fi
+  echo ""
+
+  wt_dispatch_hook clone "$wt_id" "$source_wt_id"
+
+  local wt_dir
+  wt_dir=$(git rev-parse --show-toplevel)
+  local env_file
+  env_file=$(env_file_for "$wt_dir")
+  if [[ -f "$env_file" ]]; then
+    wt_dispatch_hook env "$env_file" "$wt_id"
+    echo -e "${GREEN}Updated database env vars${NC}"
+  fi
+  write_agent_env "$wt_dir" "$wt_id"
+  if [[ -n "${WT_POST_CREATE:-}" ]]; then
+    echo -e "${BOLD}Running post-create...${NC}"
+    (cd "$wt_dir" && eval "$WT_POST_CREATE")
+  fi
+
+  echo ""
+  echo -e "${GREEN}Done. Databases for ${wt_id} cloned from ${source_wt_id}.${NC}"
+}
+
 cmd_db_status() {
   if warn_no_plugins; then
     return
@@ -2511,6 +2615,7 @@ case "$command" in
   proxy)         cmd_proxy "$@" ;;
   ngrok)      cmd_ngrok "$@" ;;
   db-init)    cmd_db_init "$@" ;;
+  db-clone)   cmd_db_clone "$@" ;;
   db-status)  cmd_db_status ;;
   db-backup)  cmd_db_backup "$@" ;;
   db-restore) cmd_db_restore "$@" ;;

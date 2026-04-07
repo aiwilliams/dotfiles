@@ -29,6 +29,13 @@ wtp_clickhouse_remove() {
   ch_drop_worktree_dbs "$wt_id"
 }
 
+wtp_clickhouse_clone() {
+  local wt_id="$1"
+  local source_wt_id="$2"
+  ch_drop_worktree_dbs "$wt_id"
+  ch_clone_worktree_dbs "$wt_id" "$source_wt_id"
+}
+
 wtp_clickhouse_env() {
   local env_file="$1"
   local wt_id="$2"
