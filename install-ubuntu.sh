@@ -142,6 +142,13 @@ if [ ! -f "$SYSCTL_INOTIFY" ]; then
   sudo sysctl --system
 fi
 
+SYSCTL_DELAYACCT="/etc/sysctl.d/60-delayacct.conf"
+if [ ! -f "$SYSCTL_DELAYACCT" ]; then
+  echo "Enabling delay accounting for ClickHouse OSIOWaitMicroseconds..."
+  echo "kernel.task_delayacct=1" | sudo tee "$SYSCTL_DELAYACCT" > /dev/null
+  sudo sysctl --system
+fi
+
 SYSCTL_MEMORY="/etc/sysctl.d/60-memory.conf"
 TOTAL_RAM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 # Reserve ~1% of RAM for min_free_kbytes, clamped to 128MB–1GB
@@ -343,6 +350,42 @@ fi
 # Create main worktree databases (no sudo needed from here)
 source "$SCRIPT_DIR/lib/postgres.sh"
 pg_create_worktree_dbs "main"
+
+# --- ClickHouse (single binary, same approach as macOS) ---
+
+echo "Installing ClickHouse..."
+
+source "$SCRIPT_DIR/lib/clickhouse.sh"
+ch_install_binary
+
+# Install systemd user service for auto-start (equivalent of macOS launchd plist)
+CH_SERVICE_DIR="$HOME/.config/systemd/user"
+CH_SERVICE="$CH_SERVICE_DIR/clickhouse-server.service"
+mkdir -p "$CH_SERVICE_DIR"
+
+cat > "$CH_SERVICE" <<UNIT
+[Unit]
+Description=ClickHouse Server (user)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${CH_BIN} server -- --path=${CH_DATA}/
+WorkingDirectory=${CH_DATA}
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+UNIT
+
+systemctl --user daemon-reload
+systemctl --user enable clickhouse-server
+systemctl --user start clickhouse-server
+
+# Ensure user services start at boot (even without login session)
+sudo loginctl enable-linger "$USER" 2>/dev/null || true
+
+ch_wait_for_start || echo "Check: journalctl --user -u clickhouse-server"
 
 # --- mkcert ---
 

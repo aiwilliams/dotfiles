@@ -52,31 +52,17 @@ psql -U postgres -c "ALTER USER postgres PASSWORD 'postgres';" 2>/dev/null || \
 source "$SCRIPT_DIR/lib/postgres.sh"
 pg_create_worktree_dbs "main"
 
-# --- ClickHouse via curl (Homebrew package is deprecated) ---
+# --- ClickHouse (single binary, Homebrew package is deprecated) ---
 
 echo "Installing ClickHouse..."
 
-CH_BIN="$HOME/.local/bin/clickhouse"
-CH_DATA="$HOME/.local/share/clickhouse"
+source "$SCRIPT_DIR/lib/clickhouse.sh"
+ch_install_binary
+
+# Install launchd plist for auto-start
 CH_PLIST_LABEL="com.clickhouse.server"
 CH_PLIST="$HOME/Library/LaunchAgents/${CH_PLIST_LABEL}.plist"
 
-mkdir -p "$HOME/.local/bin" "$CH_DATA"
-
-if [[ -f "$CH_BIN" ]]; then
-  echo "ClickHouse already installed at $CH_BIN, skipping download."
-else
-  echo "Downloading ClickHouse binary..."
-  tmpdir=$(mktemp -d)
-  (cd "$tmpdir" && curl -fsSL https://clickhouse.com/ | sh)
-  mv "$tmpdir/clickhouse" "$CH_BIN"
-  chmod +x "$CH_BIN"
-  rm -rf "$tmpdir"
-  # Remove macOS quarantine flag to avoid Gatekeeper prompt
-  xattr -d com.apple.quarantine "$CH_BIN" 2>/dev/null || true
-fi
-
-# Install launchd plist for auto-start
 cat > "$CH_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -106,16 +92,4 @@ PLIST
 launchctl bootout "gui/$(id -u)/${CH_PLIST_LABEL}" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$CH_PLIST"
 
-echo "Waiting for ClickHouse to start..."
-for _ in {1..30}; do
-  if clickhouse client --host localhost --port 9000 -q "SELECT 1" &>/dev/null; then
-    break
-  fi
-  sleep 1
-done
-
-if clickhouse client --host localhost --port 9000 -q "SELECT 1" &>/dev/null; then
-  echo "ClickHouse is running on ports 9000 (TCP) / 8123 (HTTP)."
-else
-  echo "Warning: ClickHouse did not start within 30s. Check $CH_DATA/stderr.log"
-fi
+ch_wait_for_start || echo "Check $CH_DATA/stderr.log"

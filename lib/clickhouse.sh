@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # clickhouse.sh — Shared ClickHouse function library for per-worktree database isolation.
-# Sourced (not executed) by wt-plugin-clickhouse.sh.
+# Sourced (not executed) by wt-plugin-clickhouse.sh and install scripts.
 
 CH_HOST=localhost
 CH_TCP_PORT=9000
 CH_HTTP_PORT=8123
+CH_BIN="$HOME/.local/bin/clickhouse"
+CH_DATA="$HOME/.local/share/clickhouse"
 
 # --------------------------------------------------------------------------
 # Low-level helpers
@@ -382,4 +384,42 @@ CLICKHOUSE_USERNAME="default"
 CLICKHOUSE_PASSWORD=""
 CLICKHOUSE_DATABASE="${CH_DB_PREFIXES[0]}_${sanitized}"
 EOF
+}
+
+# --------------------------------------------------------------------------
+# Installation
+# --------------------------------------------------------------------------
+
+ch_install_binary() {
+  mkdir -p "$HOME/.local/bin" "$CH_DATA"
+
+  if [[ -f "$CH_BIN" ]]; then
+    echo "ClickHouse already installed at $CH_BIN, skipping download."
+    return 0
+  fi
+
+  echo "Downloading ClickHouse binary..."
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  (cd "$tmpdir" && curl -fsSL https://clickhouse.com/ | sh)
+  mv "$tmpdir/clickhouse" "$CH_BIN"
+  chmod +x "$CH_BIN"
+  rm -rf "$tmpdir"
+
+  if [[ "$(uname)" == "Darwin" ]]; then
+    xattr -d com.apple.quarantine "$CH_BIN" 2>/dev/null || true
+  fi
+}
+
+ch_wait_for_start() {
+  echo "Waiting for ClickHouse to start..."
+  for _ in {1..30}; do
+    if clickhouse client --host "$CH_HOST" --port "$CH_TCP_PORT" -q "SELECT 1" &>/dev/null; then
+      echo "ClickHouse is running on ports ${CH_TCP_PORT} (TCP) / ${CH_HTTP_PORT} (HTTP)."
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Warning: ClickHouse did not start within 30s."
+  return 1
 }
