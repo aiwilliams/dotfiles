@@ -21,6 +21,7 @@
 #   wt ps [--all]                       Show running processes for current worktree
 #   wt kill [N|wtN|main]                Kill Next.js and Inngest for a worktree
 #   wt status                           Show project config, services, and database state
+#   wt db-cli --postgres|--clickhouse    Open interactive database shell for current worktree
 #   wt db-clone <N|wtN|main>            Drop current DBs and clone from another worktree
 #   wt db-backup [label]                Backup current worktree's databases
 #   wt db-restore [timestamp]           Restore databases from a backup
@@ -375,6 +376,7 @@ Commands:
   ngrok [options] [N|wtN|off]    Tunnel a worktree's port via ngrok (show status if no arg)
   merged                         Show worktrees whose branch PR has been merged
   status                         Show project config, services, and database state
+  db-cli [--postgres|--clickhouse] [prefix]  Open interactive database shell
   db-init [--all]                Create databases and update env vars for existing worktrees
   db-clone <N|wtN|main>          Drop current DBs and clone from another worktree
   db-status                      Show database status for current worktree
@@ -594,6 +596,18 @@ COMPANION TOOL: db-worktree
     init-main             Create main branch DBs (first-time setup)
 
 DATABASE MANAGEMENT
+
+  wt db-cli [--postgres|--clickhouse] [prefix]
+
+    Open an interactive database shell (psql or clickhouse client) connected
+    to the current worktree's database. If only one plugin is active, the
+    engine flag can be omitted. The optional prefix argument selects which
+    database when multiple prefixes are configured (defaults to the first).
+
+    Examples:
+      wt db-cli --postgres          # psql into first configured DB
+      wt db-cli --clickhouse        # clickhouse client into first configured DB
+      wt db-cli                     # auto-selects if only one plugin active
 
   wt db-init [--all]
 
@@ -1759,6 +1773,54 @@ cmd_status() {
   fi
 }
 
+cmd_db_cli() {
+  if warn_no_plugins; then
+    return
+  fi
+
+  local plugin="" db_prefix=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --postgres)   plugin="postgres"; shift ;;
+      --clickhouse) plugin="clickhouse"; shift ;;
+      -*)           echo "Unknown option: $1"; return 1 ;;
+      *)            db_prefix="$1"; shift ;;
+    esac
+  done
+
+  # Auto-select if only one plugin is active
+  if [[ -z "$plugin" ]]; then
+    if [[ ${#WT_PLUGINS[@]} -eq 1 ]]; then
+      plugin="${WT_PLUGINS[0]}"
+    else
+      echo "Specify a database: wt db-cli --postgres|--clickhouse [prefix]"
+      echo "Active plugins: ${WT_PLUGINS[*]}"
+      return 1
+    fi
+  fi
+
+  # Verify plugin is active
+  local found=false
+  for p in "${WT_PLUGINS[@]}"; do
+    [[ "$p" == "$plugin" ]] && found=true
+  done
+  if ! $found; then
+    echo -e "${RED}Plugin '$plugin' is not active. Active: ${WT_PLUGINS[*]}${NC}"
+    return 1
+  fi
+
+  local wt_id
+  wt_id=$(current_worktree_id)
+
+  local fn="wtp_${plugin}_cli"
+  if declare -f "$fn" > /dev/null 2>&1; then
+    "$fn" "$wt_id" "$db_prefix"
+  else
+    echo -e "${RED}Plugin '$plugin' does not support db-cli.${NC}"
+    return 1
+  fi
+}
+
 cmd_db_init() {
   if warn_no_plugins; then
     return
@@ -2614,6 +2676,7 @@ case "$command" in
   agent-env)     cmd_agent_env ;;
   proxy)         cmd_proxy "$@" ;;
   ngrok)      cmd_ngrok "$@" ;;
+  db-cli)     cmd_db_cli "$@" ;;
   db-init)    cmd_db_init "$@" ;;
   db-clone)   cmd_db_clone "$@" ;;
   db-status)  cmd_db_status ;;

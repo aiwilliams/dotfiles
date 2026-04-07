@@ -16,6 +16,9 @@
 #   ps_header                          — return column header name (no args)
 #   ps_data   <wt_id>                  — return column value for wt ps
 #
+# Plugin functions (called directly, not dispatched):
+#   cli       <wt_id> [prefix]         — open interactive database shell
+#
 # .wtrc variables (shell-sourceable, committed to repo root):
 #   WT_PLUGINS=(postgres clickhouse)           — active plugins (required)
 #   WT_POSTGRES_DB_PREFIXES=(platform vector)  — Postgres DB prefixes per worktree

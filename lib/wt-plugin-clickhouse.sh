@@ -19,6 +19,12 @@ source "$LIB_DIR/clickhouse.sh"
 
 CH_DB_PREFIXES=("${WT_CLICKHOUSE_DB_PREFIXES[@]}")
 
+wtp_clickhouse_cli() {
+  local wt_id="$1"
+  local prefix="${2:-}"
+  ch_cli "$wt_id" "$prefix"
+}
+
 wtp_clickhouse_create() {
   local wt_id="$1"
   ch_clone_worktree_dbs "$wt_id"

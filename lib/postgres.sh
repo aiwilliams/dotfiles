@@ -97,6 +97,24 @@ pg_clone_db() {
   fi
 }
 
+pg_cli() {
+  local branch="$1"
+  local prefix="${2:-${DB_PREFIXES[0]}}"
+  local sanitized
+  sanitized=$(pg_sanitize_branch_name "$branch")
+  local user="$sanitized"
+  local dbname="${prefix}_${sanitized}"
+
+  if ! pg_db_exists "$dbname"; then
+    echo "Error: database '$dbname' does not exist." >&2
+    echo "Available prefixes: ${DB_PREFIXES[*]}" >&2
+    return 1
+  fi
+
+  echo "Connecting to $dbname as $user..."
+  PGPASSWORD="$user" exec psql -U "$user" -h localhost -p "$PG_PORT" -d "$dbname"
+}
+
 pg_drop_db() {
   local dbname="$1"
   if ! pg_db_exists "$dbname"; then

@@ -14,6 +14,12 @@ source "$LIB_DIR/postgres.sh"
 
 DB_PREFIXES=("${WT_POSTGRES_DB_PREFIXES[@]}")
 
+wtp_postgres_cli() {
+  local wt_id="$1"
+  local prefix="${2:-}"
+  pg_cli "$wt_id" "$prefix"
+}
+
 wtp_postgres_create() {
   local wt_id="$1"
   pg_clone_worktree_dbs "$wt_id"

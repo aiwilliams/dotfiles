@@ -137,6 +137,23 @@ ch_drop_db() {
   ch_exec "DROP DATABASE \"$dbname\""
 }
 
+ch_cli() {
+  local branch="$1"
+  local prefix="${2:-${CH_DB_PREFIXES[0]}}"
+  local sanitized
+  sanitized=$(ch_sanitize_branch_name "$branch")
+  local dbname="${prefix}_${sanitized}"
+
+  if ! ch_db_exists "$dbname"; then
+    echo "Error: database '$dbname' does not exist." >&2
+    echo "Available prefixes: ${CH_DB_PREFIXES[*]}" >&2
+    return 1
+  fi
+
+  echo "Connecting to $dbname..."
+  exec clickhouse client --host "$CH_HOST" --port "$CH_TCP_PORT" --database "$dbname"
+}
+
 # --------------------------------------------------------------------------
 # High-level functions
 # --------------------------------------------------------------------------
