@@ -74,7 +74,6 @@ cat > "$CH_PLIST" <<PLIST
     <array>
         <string>${CH_BIN}</string>
         <string>server</string>
-        <string>--</string>
         <string>--path=${CH_DATA}/</string>
     </array>
     <key>WorkingDirectory</key>
@@ -89,7 +88,10 @@ cat > "$CH_PLIST" <<PLIST
 </plist>
 PLIST
 
-launchctl bootout "gui/$(id -u)/${CH_PLIST_LABEL}" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$CH_PLIST"
+if launchctl print "gui/$(id -u)/${CH_PLIST_LABEL}" &>/dev/null; then
+  launchctl kickstart -k "gui/$(id -u)/${CH_PLIST_LABEL}"
+else
+  launchctl bootstrap "gui/$(id -u)" "$CH_PLIST"
+fi
 
 ch_wait_for_start || echo "Check $CH_DATA/stderr.log"
