@@ -5,17 +5,29 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SCRIPT_DIR/lib/brew.sh"
-NVIM_VERSION="0.11.2"
 
 echo "Setting up Neovim (LazyVim)..."
 
 # --- Neovim ---
 
-CURRENT_NVIM_VERSION=$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//' || echo "none")
-if [ "$CURRENT_NVIM_VERSION" != "$NVIM_VERSION" ]; then
-  echo "Installing Neovim v${NVIM_VERSION} (current: ${CURRENT_NVIM_VERSION})..."
-  case "$(uname -s)" in
-    Linux)
+case "$(uname -s)" in
+  Darwin)
+    # brew handles version tracking and upgrades.
+    brew_install neovim
+    ;;
+  Linux)
+    # apt's neovim is usually too old for LazyVim — install the latest stable
+    # tarball from GitHub, but only when it's actually newer than what's
+    # already on disk so re-runs don't churn.
+    NVIM_LATEST=$(curl -s https://api.github.com/repos/neovim/neovim/releases/latest | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/')
+    CURRENT_NVIM_VERSION=$(nvim --version 2>/dev/null | head -1 | sed 's/NVIM v//' || echo "0.0.0")
+    if [ -z "$NVIM_LATEST" ]; then
+      echo "Warning: could not determine latest Neovim version; skipping." >&2
+    elif [ "$CURRENT_NVIM_VERSION" = "$NVIM_LATEST" ] \
+      || [ "$(printf '%s\n%s\n' "$NVIM_LATEST" "$CURRENT_NVIM_VERSION" | sort -V | tail -1)" = "$CURRENT_NVIM_VERSION" ]; then
+      echo "Neovim v${CURRENT_NVIM_VERSION} is up to date (latest: v${NVIM_LATEST}), skipping."
+    else
+      echo "Installing Neovim v${NVIM_LATEST} (current: ${CURRENT_NVIM_VERSION})..."
       # Remove apt neovim to avoid version conflicts
       if dpkg -l neovim &>/dev/null; then
         sudo apt-get remove -y neovim
@@ -26,15 +38,12 @@ if [ "$CURRENT_NVIM_VERSION" != "$NVIM_VERSION" ]; then
         aarch64) NVIM_ARCH="arm64" ;;
         *) echo "Unsupported architecture: $ARCH" >&2; return 1 ;;
       esac
-      curl -fsSL "https://github.com/neovim/neovim/releases/download/v${NVIM_VERSION}/nvim-linux-${NVIM_ARCH}.tar.gz" \
+      curl -fsSL "https://github.com/neovim/neovim/releases/download/v${NVIM_LATEST}/nvim-linux-${NVIM_ARCH}.tar.gz" \
         | sudo tar xzf - -C /opt
-      sudo ln -sf /opt/nvim-linux-${NVIM_ARCH}/bin/nvim /usr/local/bin/nvim
-      ;;
-    Darwin)
-      brew_install neovim
-      ;;
-  esac
-fi
+      sudo ln -sf "/opt/nvim-linux-${NVIM_ARCH}/bin/nvim" /usr/local/bin/nvim
+    fi
+    ;;
+esac
 
 # --- LazyVim dependencies ---
 
