@@ -74,7 +74,6 @@ cat > "$CH_PLIST" <<PLIST
     <array>
         <string>${CH_BIN}</string>
         <string>server</string>
-        <string>--path=${CH_DATA}/</string>
     </array>
     <key>WorkingDirectory</key>
     <string>${CH_DATA}</string>
