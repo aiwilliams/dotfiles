@@ -110,7 +110,7 @@ fi
 # Global gitignore
 GLOBAL_GITIGNORE="$HOME/.config/git/ignore"
 mkdir -p "$(dirname "$GLOBAL_GITIGNORE")"
-for pattern in .env.agent .mise.local.toml .wtrc; do
+for pattern in .env.agent .mise.local.toml .wtrc '**/.claude/settings.local.json' '**/.claude/scheduled_tasks.lock'; do
   if [ ! -f "$GLOBAL_GITIGNORE" ] || ! grep -qxF "$pattern" "$GLOBAL_GITIGNORE"; then
     echo "$pattern" >> "$GLOBAL_GITIGNORE"
   fi
