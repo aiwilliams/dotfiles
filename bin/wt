@@ -15,6 +15,7 @@
 #   wt merged                           Show worktrees whose branch PR has been merged
 #   wt switch [N|wtN|main]               Switch to worktree (fzf picker if no arg)
 #   wt env-sync                         Copy main .env to all worktrees
+#   wt env-diff                         Preview what env-sync would change in each worktree
 #   wt agent-env                        Write .env.agent for current worktree
 #   wt proxy [options] [N|off]           Route HTTPS proxy to a worktree
 #   wt ngrok [N|wtN|off]                Tunnel a worktree's port via ngrok
@@ -371,6 +372,7 @@ Commands:
   main                           Switch to the main worktree
   switch [N|wtN|main]            Switch to worktree (interactive fzf picker if no arg)
   env-sync                       Copy main .env to all worktrees, preserving wt-specific vars
+  env-diff                       Show what wt env-sync would change in each worktree
   agent-env                      Write .env.agent for current worktree
   proxy [options] [N|wtN|off]    Route HTTPS proxy to a worktree (show current if no arg)
   ngrok [options] [N|wtN|off]    Tunnel a worktree's port via ngrok (show status if no arg)
@@ -478,6 +480,18 @@ COMMANDS
     is preserved per-worktree (not copied
     from main). Run this after editing the primary .env to propagate changes
     to all worktrees.
+
+  wt env-diff
+
+    Preview env-sync without writing anything. For each worktree, simulates
+    what env-sync would produce and reports the diff against the worktree's
+    current .env in three buckets:
+
+      Will be removed   keys present only in the worktree (would be dropped)
+      Will change       keys whose value would be overwritten by main's value
+      Will be added     keys present only in main (would be copied in)
+
+    Use this before env-sync to confirm you won't lose worktree-local edits.
 
   wt agent-env
 
@@ -2075,6 +2089,156 @@ cmd_env_sync() {
   fi
 }
 
+# Emit "key<TAB>value" for each KEY=VALUE in $1. Last occurrence wins; sorted by key.
+parse_env_kv() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    /^[A-Za-z_][A-Za-z0-9_]*=/ {
+      eq = index($0, "=")
+      key = substr($0, 1, eq - 1)
+      val = substr($0, eq + 1)
+      kv[key] = val
+    }
+    END { for (k in kv) print k "\t" kv[k] }
+  ' "$file" | LC_ALL=C sort
+}
+
+cmd_env_diff() {
+  local main_dir
+  main_dir=$(main_worktree_dir)
+  local main_env
+  main_env=$(env_file_for "$main_dir")
+  local repo
+  repo=$(repo_name)
+  local parent_dir
+  parent_dir=$(dirname "$main_dir")
+
+  if [[ ! -f "$main_env" ]]; then
+    echo -e "${RED}Main .env not found: ${main_env}${NC}"
+    exit 1
+  fi
+
+  local count=0
+  local any_diff=0
+
+  for dir in "$parent_dir/${repo}"-wt[0-9]*; do
+    [[ -d "$dir" ]] || continue
+    local name
+    name=$(basename "$dir")
+    local num="${name#"${repo}-wt"}"
+    [[ "$num" =~ ^[0-9]+$ ]] || continue
+
+    local wt_id="wt${num}"
+    local wt_env
+    wt_env=$(env_file_for "$dir")
+    local port
+    port=$(compute_port "$num")
+
+    ((++count))
+
+    echo ""
+    echo -e "${BOLD}==> ${GREEN}${wt_id}${NC} ${DIM}${wt_env}${NC}"
+
+    if [[ ! -f "$wt_env" ]]; then
+      echo -e "  ${YELLOW}No .env exists yet — env-sync would create it from main.${NC}"
+      any_diff=1
+      continue
+    fi
+
+    # Reproduce env-sync's output into a temp file so we can diff against the
+    # current .env and report exactly what would change.
+    local sim_env
+    sim_env=$(mktemp)
+    cp "$main_env" "$sim_env"
+    local tmp
+    tmp=$(mktemp)
+    grep -v '^PROXY_DOMAIN=' "$sim_env" > "$tmp" || true
+    mv "$tmp" "$sim_env"
+    local prev_proxy
+    prev_proxy=$(read_proxy_domain "$wt_env")
+    if [[ -n "$prev_proxy" ]]; then
+      set_proxy_domain "$sim_env" "$prev_proxy"
+    fi
+    write_env_vars "$sim_env" "$wt_id" "$port"
+
+    local wt_kv_file sim_kv_file
+    wt_kv_file=$(mktemp)
+    sim_kv_file=$(mktemp)
+    parse_env_kv "$wt_env" > "$wt_kv_file"
+    parse_env_kv "$sim_env" > "$sim_kv_file"
+
+    local diff_output
+    diff_output=$(awk -F'\t' '
+      NR == FNR { wkv[$1] = $2; wkeys[++wn] = $1; next }
+      { skv[$1] = $2; skeys[++sn] = $1 }
+      END {
+        for (i = 1; i <= wn; i++) {
+          k = wkeys[i]
+          if (!(k in skv)) print "LOST\t" k "\t" wkv[k]
+          else if (wkv[k] != skv[k]) print "CHANGED\t" k "\t" wkv[k] "\t" skv[k]
+        }
+        for (i = 1; i <= sn; i++) {
+          k = skeys[i]
+          if (!(k in wkv)) print "ADDED\t" k "\t" skv[k]
+        }
+      }
+    ' "$wt_kv_file" "$sim_kv_file")
+
+    rm -f "$wt_kv_file" "$sim_kv_file" "$sim_env"
+
+    if [[ -z "$diff_output" ]]; then
+      echo -e "  ${DIM}In sync — env-sync would be a no-op.${NC}"
+      continue
+    fi
+
+    any_diff=1
+
+    local lost changed added
+    lost=$(awk -F'\t' '$1=="LOST"' <<< "$diff_output" | LC_ALL=C sort -t$'\t' -k2)
+    changed=$(awk -F'\t' '$1=="CHANGED"' <<< "$diff_output" | LC_ALL=C sort -t$'\t' -k2)
+    added=$(awk -F'\t' '$1=="ADDED"' <<< "$diff_output" | LC_ALL=C sort -t$'\t' -k2)
+
+    if [[ -n "$lost" ]]; then
+      echo -e "  ${RED}Will be removed${NC} ${DIM}(in ${wt_id} only — env-sync would drop these):${NC}"
+      while IFS=$'\t' read -r _ key val; do
+        echo "    ${key}=${val}"
+      done <<< "$lost"
+    fi
+
+    if [[ -n "$changed" ]]; then
+      echo -e "  ${YELLOW}Will change${NC} ${DIM}(main differs from ${wt_id}):${NC}"
+      while IFS=$'\t' read -r _ key wval sval; do
+        echo "    ${key}"
+        echo -e "      ${RED}- ${wval}${NC}"
+        echo -e "      ${GREEN}+ ${sval}${NC}"
+      done <<< "$changed"
+    fi
+
+    if [[ -n "$added" ]]; then
+      echo -e "  ${GREEN}Will be added${NC} ${DIM}(in main only):${NC}"
+      while IFS=$'\t' read -r _ key val; do
+        echo "    ${key}=${val}"
+      done <<< "$added"
+    fi
+  done
+
+  if [[ "$count" -eq 0 ]]; then
+    echo -e "${YELLOW}No worktrees found.${NC}"
+    return
+  fi
+
+  echo ""
+  if [[ "$any_diff" -eq 0 ]]; then
+    echo -e "${BOLD}All ${count} worktree(s) are in sync with main.${NC} ${DIM}wt env-sync would be a no-op.${NC}"
+  else
+    echo -e "${BOLD}Compared main against ${count} worktree(s).${NC}"
+    echo -e "${DIM}Run 'wt env-sync' to apply main's .env to all worktrees.${NC}"
+  fi
+}
+
 # Print "number\tbranch" lines for each worktree whose PR has been merged.
 # Requires gh CLI. Returns 1 if none found.
 merged_worktrees() {
@@ -2673,6 +2837,7 @@ case "$command" in
   main)       cmd_main ;;
   switch)     cmd_switch "$@" ;;
   env-sync)      cmd_env_sync ;;
+  env-diff)      cmd_env_diff ;;
   agent-env)     cmd_agent_env ;;
   proxy)         cmd_proxy "$@" ;;
   ngrok)      cmd_ngrok "$@" ;;
