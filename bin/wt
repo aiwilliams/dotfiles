@@ -466,6 +466,19 @@ COMMANDS
     Print a worktree path. With no argument, opens an interactive fzf picker.
     With a number, prints the path directly. Useful with cd: cd $(wt switch 2)
 
+  wt install [pnpm-install-args...]
+
+    Run `pnpm install` here, then re-apply the tsgo-shim across every
+    worktree of this repo (see `tsgo-shim --help`). Use this in place of
+    a bare `pnpm install` whenever the project ships @typescript/native-preview;
+    pnpm install replaces the shim with a fresh hard link to its store, so
+    re-shimming is required to keep tsgo serialization in effect.
+
+    Examples:
+      wt install
+      wt install --frozen-lockfile
+      wt install some-pkg
+
   wt merged
 
     Show worktrees whose branch has a merged PR on GitHub. Useful for
@@ -1630,6 +1643,32 @@ cmd_switch() {
   if [[ -n "$selection" ]]; then
     echo "$selection"
   fi
+}
+
+# Run `pnpm install` here, then re-shim tsgo across every worktree of this
+# repo. pnpm install replaces tsgo with a fresh hard link to its store, so
+# we have to re-shim afterwards or the next type-check runs the raw binary.
+# tsgo-shim is itself project-agnostic — we hand it the worktree paths.
+cmd_install() {
+  pnpm install "$@"
+
+  if ! command -v tsgo-shim &>/dev/null; then
+    echo -e "${YELLOW}tsgo-shim not on PATH, skipping serialization shim${NC}" >&2
+    return 0
+  fi
+
+  local -a roots=()
+  while IFS= read -r line; do
+    [[ "$line" =~ ^worktree\ (.+)$ ]] && roots+=( "${BASH_REMATCH[1]}" )
+  done < <(git worktree list --porcelain)
+
+  if [[ ${#roots[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  echo ""
+  echo -e "${BOLD}Re-shimming tsgo across ${#roots[@]} worktree(s)...${NC}"
+  tsgo-shim "${roots[@]}"
 }
 
 cmd_status() {
@@ -2836,6 +2875,7 @@ case "$command" in
   list)       cmd_list ;;
   main)       cmd_main ;;
   switch)     cmd_switch "$@" ;;
+  install)    cmd_install "$@" ;;
   env-sync)      cmd_env_sync ;;
   env-diff)      cmd_env_diff ;;
   agent-env)     cmd_agent_env ;;
