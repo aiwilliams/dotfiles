@@ -110,9 +110,13 @@ if ! command -v earlyoom &>/dev/null; then
   sudo apt-get install -y earlyoom
 fi
 
+# --avoid: kill these only as a last resort (subtracts 300 from oom_score).
+#   Killing the postgres parent or the JetBrains Remote Dev backend ("idea")
+#   takes down the whole DB / IDE session, so they're protected but still killable
+#   if it's the only way to keep tailscaled+sshd alive.
 EARLYOOM_CONF="/etc/default/earlyoom"
-EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 10,5 -s 100,100 -r 3600 --avoid '(^|/)(tailscaled|sshd|systemd|containerd|dockerd)\$' --prefer '(^|/)(java|next-server|node|tsgo|chrome|firefox)\$' -n\""
-if ! grep -qF -- '-m 10,5' "$EARLYOOM_CONF" 2>/dev/null; then
+EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 10,5 -s 100,100 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea)\$' --prefer '^(next-server|node|tsgo|chrome|firefox)\$' -n\""
+if [ ! -f "$EARLYOOM_CONF" ] || ! diff -q <(echo "$EARLYOOM_DESIRED") "$EARLYOOM_CONF" &>/dev/null; then
   echo "Configuring earlyoom..."
   echo "$EARLYOOM_DESIRED" | sudo tee "$EARLYOOM_CONF" > /dev/null
 fi
