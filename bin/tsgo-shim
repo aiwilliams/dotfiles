@@ -1,52 +1,55 @@
 #!/usr/bin/env bash
-# tsgo-shim — serialize tsgo across platform worktrees with flock.
+# tsgo-shim — serialize tsgo invocations across one or more project roots.
 #
 # WHY
-#   Each tsgo type-check on the platform monorepo uses 13–19 GiB RSS. With
+#   Each tsgo type-check on a large monorepo can hold 10–20 GiB RSS. With
 #   multiple worktrees type-checking concurrently, the box runs out of RAM
 #   and earlyoom kills tsgo. Editors then complain that their tsgo died.
-#   Serializing tsgo invocations across worktrees keeps memory pressure
-#   bounded to one tsgo at a time.
+#   Serializing tsgo via flock keeps memory pressure to one tsgo at a time.
 #
 # HOW
-#   pnpm installs the platform-specific binary at a path like
-#     <wt>/node_modules/.pnpm/@typescript+native-preview-linux-x64@<ver>/
+#   pnpm installs the platform-specific binary at:
+#     <root>/node_modules/.pnpm/@typescript+native-preview-linux-x64@<ver>/
 #       node_modules/@typescript/native-preview-linux-x64/lib/tsgo
-#   and (on the same filesystem) hard-links every worktree's copy to one
-#   shared inode in pnpm's content-addressable store. We:
-#     1. Hard-link the original binary to a sibling `tsgo.real` in the same
-#        lib/ directory (preserves the shared inode across worktrees, costs
-#        zero extra disk).
-#     2. Atomically replace `tsgo` with a small shell shim via rename(2).
-#        Rename, not in-place truncate, avoids ETXTBSY if a tsgo is currently
-#        running.
+#   For each lib/tsgo found under each ROOT, this driver:
+#     1. Hard-links the original binary to a sibling `tsgo.real` in the same
+#        lib/ directory (no extra disk; just a new name for the existing inode).
+#     2. Atomically replaces `tsgo` with a small sh shim via rename(2). Rename,
+#        not in-place truncate, avoids ETXTBSY if a tsgo is currently running.
 #     3. The shim takes a flock and execs `./tsgo.real`. Keeping the real
-#        binary in the original lib/ directory matters: tsgo loads its
-#        bundled lib.*.d.ts files relative to its own executable path.
-#
-# MISE NOTE
-#   tsgo is invoked indirectly: node_modules/.bin/tsgo is a sh wrapper that
-#   runs `node tsgo.js`, and tsgo.js does execFileSync on lib/tsgo. Mise
-#   manages which `node` runs the wrapper, but the heavy 13–19 GiB process
-#   is the native ELF at lib/tsgo — that's where we intercept. Mise has no
-#   bearing on the shim itself, and this driver is plain bash with no Node
-#   dependency.
+#        binary in lib/ matters: tsgo loads its bundled lib.*.d.ts files
+#        relative to its own executable path.
 #
 # USAGE
-#   tsgo-shim              Apply (or refresh) the shim across all worktrees.
-#   tsgo-shim --status     Show SHIM/RAW status for each detected lib/tsgo.
-#   tsgo-shim --restore    Move tsgo.real back over tsgo (undo).
+#   tsgo-shim [--lock PATH] [ROOT ...]            apply (or refresh) shims
+#   tsgo-shim --status   [ROOT ...]               show SHIM/RAW per lib/tsgo
+#   tsgo-shim --restore  [ROOT ...]               undo: mv tsgo.real → tsgo
+#
+#   ROOT defaults to the current directory if none are given. Multiple ROOTs
+#   are walked independently. ROOTs may be any directory containing (directly
+#   or several levels deep) a node_modules/.pnpm tree with tsgo installed.
+#
+#   --lock PATH selects the flock file written into the generated shim.
+#   Default: /run/user/$UID/tsgo.lock (one global lock — over-serializes
+#   across projects, which is what you want when memory is the constraint).
+#   Pass a project-specific path if you'd rather have per-project queues.
 #
 # WHEN TO RUN
-#   After every `pnpm install` of the platform repo. The install replaces
-#   the shim with a fresh hard link to pnpm's store, so re-shim afterwards.
-#   Idempotent and safe to re-run.
+#   After every `pnpm install` of a project that ships tsgo. The install
+#   replaces the shim with a fresh hard link to pnpm's store, so re-shim
+#   afterwards. Idempotent and safe to re-run.
+#
+# MISE NOTE
+#   tsgo's `node_modules/.bin/tsgo` is a sh wrapper that runs `node tsgo.js`,
+#   and tsgo.js does execFileSync on the native lib/tsgo. Mise picks the
+#   `node` for the wrapper, but the heavy 10–20 GiB process is the native
+#   ELF — that's where we intercept. Mise has no bearing on the shim, and
+#   this driver is plain bash with no Node dependency.
 
 set -euo pipefail
 
-PROJECT_GLOB="$HOME/projects/private/opine/platform*"
-LOCK_PATH="/run/user/$(id -u)/tsgo-platform.lock"
-SHIM_MARKER="# tsgo-shim v2"
+DEFAULT_LOCK="/run/user/$(id -u)/tsgo.lock"
+SHIM_MARKER="# tsgo-shim v3"
 
 bold='\033[1m'; green='\033[32m'; yellow='\033[33m'; reset='\033[0m'
 
@@ -55,15 +58,17 @@ usage() {
   exit "${1:-0}"
 }
 
-# Print every worktree's lib/tsgo path. Empty output if none installed.
-# Two layers of globs intentionally expand: $PROJECT_GLOB ends in `platform*`
-# and the pnpm package directory is versioned. shellcheck SC2206 flags the
-# implicit word-splitting; that's exactly what we want here.
+# Print every lib/tsgo path found under any of the given ROOTs.
+# Two layers of globs intentionally expand: the ROOT and the versioned
+# pnpm package directory.
 binary_paths() {
   shopt -s nullglob
-  # shellcheck disable=SC2206
-  local paths=( $PROJECT_GLOB/node_modules/.pnpm/@typescript+native-preview-linux-x64@*/node_modules/@typescript/native-preview-linux-x64/lib/tsgo )
-  printf '%s\n' "${paths[@]}"
+  local root
+  for root in "$@"; do
+    # shellcheck disable=SC2206
+    local paths=( "$root"/node_modules/.pnpm/@typescript+native-preview-linux-x64@*/node_modules/@typescript/native-preview-linux-x64/lib/tsgo )
+    printf '%s\n' "${paths[@]}"
+  done
 }
 
 # Cheap check: shim files start with "#!" and contain our marker in the head.
@@ -74,21 +79,22 @@ is_shim() {
 # Render the shim content. Always execs ./tsgo.real next to itself, so
 # bundled lib.*.d.ts assets resolve via the binary's actual directory.
 render_shim() {
+  local lock=$1
   cat <<EOF
 #!/bin/sh
 $SHIM_MARKER
-# Serializes tsgo across platform worktrees via /usr/bin/flock.
-# Generated by ~/dotfiles/bin/tsgo-shim. Re-run that after pnpm install.
-# To restore by hand: mv "\$(dirname "\$0")/tsgo.real" "\$0".
+# Serializes tsgo via /usr/bin/flock. Generated by ~/dotfiles/bin/tsgo-shim;
+# re-run that after pnpm install. To restore by hand:
+#   mv "\$(dirname "\$0")/tsgo.real" "\$0"
 
-LOCK="$LOCK_PATH"
+LOCK="$lock"
 REAL="\$(dirname "\$0")/tsgo.real"
 
 # If the lock is currently held, surface it so the caller knows we're queued
 # rather than wedged. This is a hint only (the held state can change before
 # the real flock below runs); the actual serialization is done by the exec.
 if ! /usr/bin/flock -n "\$LOCK" true 2>/dev/null; then
-  printf 'tsgo-shim: waiting on %s (another worktree is type-checking)...\n' "\$LOCK" >&2
+  printf 'tsgo-shim: waiting on %s (another type-check is running)...\n' "\$LOCK" >&2
 fi
 
 printf 'tsgo-shim: running %s under flock %s\n' "\$REAL" "\$LOCK" >&2
@@ -102,18 +108,16 @@ EOF
 #   - mv (rename) of the shim over tsgo is atomic; an in-flight tsgo keeps
 #     running off the now-unlinked-but-still-open original inode.
 shim_one() {
-  local target=$1
+  local target=$1 lock=$2
   local real="${target}.real"
   local dir; dir="$(dirname "$target")"
 
-  # Capture the original inode under tsgo.real if we haven't already.
   if [ ! -e "$real" ]; then
     ln "$target" "$real"
   fi
 
-  # Build the shim in the same directory, then atomically rename into place.
   local tmp; tmp="$(mktemp -p "$dir" .tsgo-shim.XXXXXX)"
-  render_shim >"$tmp"
+  render_shim "$lock" >"$tmp"
   chmod 0755 "$tmp"
   mv -f "$tmp" "$target"
 }
@@ -128,13 +132,14 @@ cmd_status() {
     else
       printf "  ${yellow}RAW${reset}  %s\n" "$p"
     fi
-  done < <(binary_paths)
+  done < <(binary_paths "$@")
   if [ "$any" = 0 ]; then
-    printf "  ${yellow}no tsgo binaries found under %s${reset}\n" "$PROJECT_GLOB"
+    printf "  ${yellow}no tsgo binaries found under: %s${reset}\n" "$*"
   fi
 }
 
 cmd_apply() {
+  local lock=$1; shift
   local count=0 skipped=0
   while IFS= read -r target; do
     [ -z "$target" ] && continue
@@ -142,10 +147,10 @@ cmd_apply() {
       skipped=$((skipped + 1))
       continue
     fi
-    shim_one "$target"
+    shim_one "$target" "$lock"
     printf "  ${green}shimmed${reset} %s\n" "$target"
     count=$((count + 1))
-  done < <(binary_paths)
+  done < <(binary_paths "$@")
   printf "${bold}done:${reset} %d shimmed, %d already-shim\n" "$count" "$skipped"
 }
 
@@ -164,14 +169,33 @@ cmd_restore() {
     mv -f "$real" "$target"
     printf "  ${green}restored${reset} %s\n" "$target"
     count=$((count + 1))
-  done < <(binary_paths)
+  done < <(binary_paths "$@")
   printf "${bold}done:${reset} %d restored\n" "$count"
 }
 
-case "${1:-apply}" in
-  apply|'')   cmd_apply   ;;
-  --status)   cmd_status  ;;
-  --restore)  cmd_restore ;;
-  -h|--help)  usage 0     ;;
-  *)          usage 1     ;;
+mode=apply
+lock=$DEFAULT_LOCK
+roots=()
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --status)   mode=status; shift ;;
+    --restore)  mode=restore; shift ;;
+    --lock)     lock=$2; shift 2 ;;
+    --lock=*)   lock=${1#--lock=}; shift ;;
+    -h|--help)  usage 0 ;;
+    --)         shift; roots+=( "$@" ); break ;;
+    -*)         usage 1 ;;
+    *)          roots+=( "$1" ); shift ;;
+  esac
+done
+
+if [ ${#roots[@]} -eq 0 ]; then
+  roots=( "$PWD" )
+fi
+
+case $mode in
+  apply)    cmd_apply   "$lock" "${roots[@]}" ;;
+  status)   cmd_status         "${roots[@]}" ;;
+  restore)  cmd_restore        "${roots[@]}" ;;
 esac
