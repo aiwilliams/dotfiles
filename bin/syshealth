@@ -87,6 +87,55 @@ collect_alerts() {
   if ! systemctl is-active network-watchdog.timer &>/dev/null; then
     alerts+=("$(printf "${yellow}Network watchdog timer: inactive${reset}")")
   fi
+
+  # Airbyte — only alert when the cluster is RUNNING but unhealthy.
+  # A stopped cluster is intentional in the turn-it-on-when-you-need-it workflow.
+  local airbyte_container="airbyte-abctl-control-plane"
+  if [ "$(docker inspect -f '{{.State.Running}}' "$airbyte_container" 2>/dev/null)" = "true" ]; then
+    local airbyte_summary
+    airbyte_summary=$(airbyte_pod_summary)
+    if [ -n "$airbyte_summary" ]; then
+      local ready_total max_restart worst
+      IFS='|' read -r ready_total max_restart worst <<<"$airbyte_summary"
+      if [ "${max_restart:-0}" -gt 10 ]; then
+        alerts+=("$(printf "${red}Airbyte: %s crash-looping (%s restarts), pods ready %s${reset}" \
+          "$worst" "$max_restart" "$ready_total")")
+      fi
+    fi
+  fi
+}
+
+# Returns "ready/total|max_restart|worst_pod_name" or empty string on failure.
+# Filters out the bootloader (a one-shot Job that legitimately reports Succeeded).
+airbyte_pod_summary() {
+  local container="airbyte-abctl-control-plane"
+  local pods_json
+  pods_json=$(timeout 3 docker exec "$container" \
+    kubectl get pods -n airbyte-abctl -o json 2>/dev/null) || return 1
+  [ -z "$pods_json" ] && return 1
+  printf '%s' "$pods_json" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+items = [p for p in d.get("items", []) if "bootloader" not in p["metadata"]["name"]]
+if not items:
+    sys.exit(1)
+ready = 0
+max_restart = 0
+worst = ""
+for p in items:
+    cs = p.get("status", {}).get("containerStatuses") or []
+    if cs and all(c.get("ready") for c in cs):
+        ready += 1
+    for c in cs:
+        r = c.get("restartCount", 0)
+        if r > max_restart:
+            max_restart = r
+            worst = p["metadata"]["name"]
+print(f"{ready}/{len(items)}|{max_restart}|{worst}")
+' 2>/dev/null
 }
 
 # --- Watch mode ---
@@ -129,16 +178,47 @@ full_report() {
     printf "  ${red}inactive${reset}\n"
   fi
 
-  # --- Airbyte container ---
-  section "Airbyte container"
-  if docker inspect airbyte-abctl-control-plane &>/dev/null 2>&1; then
-    docker stats --no-stream --format "  {{.Name}}: {{.MemUsage}} ({{.MemPerc}})" airbyte-abctl-control-plane 2>/dev/null
-    # Pod limits
-    docker exec airbyte-abctl-control-plane kubectl get pods -n airbyte-abctl --no-headers \
-      -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,LIMIT:.spec.containers[0].resources.limits.memory' \
-      2>/dev/null | grep -v bootloader | sed 's/^/  /'
+  # --- Airbyte (kind cluster) ---
+  # The cluster is intended to be turn-it-on-when-you-need-it: nothing on the
+  # host autostarts it, and Docker's restart policy only kicks in if dockerd
+  # itself restarts. Stopped is a fine resting state — the section's job is to
+  # tell you which command turns it back on.
+  section "Airbyte (kind cluster)"
+  airbyte_container="airbyte-abctl-control-plane"
+  if ! docker inspect "$airbyte_container" &>/dev/null; then
+    printf "  ${yellow}not installed${reset}\n"
+    printf "  install with: ${bold}abctl local install${reset}\n"
+  elif [ "$(docker inspect -f '{{.State.Running}}' "$airbyte_container" 2>/dev/null)" != "true" ]; then
+    printf "  ${yellow}stopped${reset}\n"
+    printf "  start with: ${bold}docker start %s${reset}\n" "$airbyte_container"
   else
-    printf "  ${yellow}not running${reset}\n"
+    summary=$(airbyte_pod_summary)
+    mem=$(docker stats --no-stream --format "{{.MemUsage}}" "$airbyte_container" 2>/dev/null)
+    if [ -z "$summary" ]; then
+      printf "  ${yellow}running, kubelet not ready yet${reset} (mem %s)\n" "$mem"
+    else
+      IFS='|' read -r ready_total max_restart worst <<<"$summary"
+      ready=${ready_total%/*}
+      total=${ready_total#*/}
+      if [ "${max_restart:-0}" -gt 10 ]; then
+        state_color="${red}"
+        state_label="degraded"
+      elif [ "$ready" != "$total" ]; then
+        state_color="${yellow}"
+        state_label="settling"
+      else
+        state_color="${green}"
+        state_label="healthy"
+      fi
+      printf "  ${state_color}%s${reset} — pods ready %s, mem %s\n" \
+        "$state_label" "$ready_total" "$mem"
+      if [ "${max_restart:-0}" -gt 10 ]; then
+        printf "  ${red}%s: %s restarts (crash-looping)${reset}\n" "$worst" "$max_restart"
+        printf "  inspect: ${bold}docker exec %s kubectl -n airbyte-abctl logs %s --previous${reset}\n" \
+          "$airbyte_container" "$worst"
+      fi
+      printf "  stop with: ${bold}docker stop %s${reset}\n" "$airbyte_container"
+    fi
   fi
 
   # --- earlyoom ---
