@@ -104,18 +104,59 @@ UNIT
   sudo systemctl daemon-reload
 fi
 
-# Install earlyoom to kill memory hogs before the system becomes unresponsive
+# Two-layer OOM defense:
+#   1. systemd-oomd (primary): PSI-aware, only acts on sustained pressure (~20s),
+#      kills the worst single user-session cgroup. Handles routine memory spikes
+#      (overlapping type-check + lint + dev-server) gracefully.
+#   2. earlyoom (catastrophe fallback): only fires when memory + swap are both
+#      near-zero — basically a last-ditch panic button before the kernel OOM
+#      killer. tailscaled and sshd have OOMScoreAdjust=-900 so the kernel
+#      backstop won't take them either.
+
+# Layer 1: systemd-oomd PSI-based monitoring.
+OOMD_CONF="/etc/systemd/oomd.conf.d/00-tuning.conf"
+OOMD_CONF_DESIRED="[OOM]
+SwapUsedLimit=95%
+DefaultMemoryPressureLimit=60%
+DefaultMemoryPressureDurationSec=20s"
+if [ ! -f "$OOMD_CONF" ] || ! diff -q <(echo "$OOMD_CONF_DESIRED") "$OOMD_CONF" &>/dev/null; then
+  echo "Configuring systemd-oomd thresholds..."
+  sudo mkdir -p /etc/systemd/oomd.conf.d
+  echo "$OOMD_CONF_DESIRED" | sudo tee "$OOMD_CONF" > /dev/null
+fi
+
+# Opt user.slice into oomd management. Without this, oomd does nothing — the
+# default ManagedOOM* settings on user.slice are "auto" which is effectively off.
+USER_SLICE_OOMD="/etc/systemd/system/user.slice.d/00-oomd.conf"
+USER_SLICE_OOMD_DESIRED="[Slice]
+ManagedOOMMemoryPressure=kill
+ManagedOOMSwap=kill"
+if [ ! -f "$USER_SLICE_OOMD" ] || ! diff -q <(echo "$USER_SLICE_OOMD_DESIRED") "$USER_SLICE_OOMD" &>/dev/null; then
+  echo "Enabling oomd management on user.slice..."
+  sudo mkdir -p /etc/systemd/system/user.slice.d
+  echo "$USER_SLICE_OOMD_DESIRED" | sudo tee "$USER_SLICE_OOMD" > /dev/null
+  sudo systemctl daemon-reload
+fi
+
+sudo systemctl enable systemd-oomd
+sudo systemctl restart systemd-oomd
+
+# Layer 2: earlyoom as catastrophic fallback.
 if ! command -v earlyoom &>/dev/null; then
   echo "Installing earlyoom..."
   sudo apt-get install -y earlyoom
 fi
 
+# Thresholds are intentionally close to kernel-OOM levels — oomd handles routine
+# pressure first via PSI (with a 20s sustained-pressure window). earlyoom only
+# fires when memory available drops below 3% AND swap free drops below 5%, with
+# SIGKILL at 1%/2%. Above that, the kernel OOM killer is the absolute backstop.
 # --avoid: kill these only as a last resort (subtracts 300 from oom_score).
 #   Killing the postgres parent or the JetBrains Remote Dev backend ("idea")
 #   takes down the whole DB / IDE session, so they're protected but still killable
 #   if it's the only way to keep tailscaled+sshd alive.
 EARLYOOM_CONF="/etc/default/earlyoom"
-EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 10,5 -s 100,100 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea)\$' --prefer '^(next-server|node|tsgo|chrome|firefox)\$' -n\""
+EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 3,1 -s 5,2 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea)\$' --prefer '^(next-server|node|tsgo|chrome|firefox)\$' -n\""
 if [ ! -f "$EARLYOOM_CONF" ] || ! diff -q <(echo "$EARLYOOM_DESIRED") "$EARLYOOM_CONF" &>/dev/null; then
   echo "Configuring earlyoom..."
   echo "$EARLYOOM_DESIRED" | sudo tee "$EARLYOOM_CONF" > /dev/null
