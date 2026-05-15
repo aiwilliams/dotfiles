@@ -133,6 +133,14 @@ jq '.statusLine = {"type": "command", "command": "bash ~/.claude/statusline-comm
   "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
 echo "Configured Claude Code statusline"
 
+# The *-ansi themes render diff context and dimmed text from the terminal's
+# bright-black ANSI slot, which collapses to near-invisible on dark Ghostty
+# backgrounds. Normalize to the fixed-RGB equivalents (which carry their own
+# contrast) while preserving each machine's light/dark preference.
+jq '(.theme) |= (if . == "dark-ansi" then "dark" elif . == "light-ansi" then "light" else . end)' \
+  "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+echo "Normalized Claude Code theme (no *-ansi)"
+
 # Claude Code MCP servers
 source "$SCRIPT_DIR/lib/claude-mcp.sh"
 
