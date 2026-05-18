@@ -19,8 +19,9 @@ section() { printf "\n${bold}── %s${reset}\n" "$1"; }
 bell() { printf '\a'; }
 
 # Thresholds
-MEM_WARN_PCT=25    # warn when available memory drops below this % of total
-SLICE_WARN_PCT=75  # warn when Docker slice usage exceeds this % of its limit
+MEM_WARN_PCT=25      # warn when available memory drops below this % of total
+SLICE_WARN_PCT=75    # warn when Docker slice usage exceeds this % of its limit
+INOTIFY_WARN_PCT=80  # warn when inotify watches/instances exceed this % of limit
 
 # --- Collect checks (used by both modes) ---
 
@@ -33,6 +34,28 @@ collect_alerts() {
   if [ "$mem_pct" -lt "$MEM_WARN_PCT" ]; then
     alerts+=("$(printf "${red}Memory: %d%% available (%d MB free of %d MB)${reset}" \
       "$mem_pct" "$(( mem_avail / 1024 ))" "$(( mem_total / 1024 ))")")
+  fi
+
+  # inotify watches / instances (both exhaust as a misleading ENOSPC)
+  if [ -r /proc/sys/fs/inotify/max_user_watches ]; then
+    iw_max=$(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo 0)
+    if [ "${iw_max:-0}" -gt 0 ] 2>/dev/null; then
+      iw_used=$(inotify_watches_used)
+      iw_pct=$(( ${iw_used:-0} * 100 / iw_max ))
+      if [ "$iw_pct" -ge "$INOTIFY_WARN_PCT" ]; then
+        alerts+=("$(printf "${red}inotify watches: %d%% of limit (%d / %d) — stale dev daemon in an idle worktree?${reset}" \
+          "$iw_pct" "${iw_used:-0}" "$iw_max")")
+      fi
+    fi
+    ii_max=$(cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo 0)
+    if [ "${ii_max:-0}" -gt 0 ] 2>/dev/null; then
+      ii_used=$(inotify_instances_used)
+      ii_pct=$(( ${ii_used:-0} * 100 / ii_max ))
+      if [ "$ii_pct" -ge "$INOTIFY_WARN_PCT" ]; then
+        alerts+=("$(printf "${red}inotify instances: %d%% of limit (%d / %d)${reset}" \
+          "$ii_pct" "${ii_used:-0}" "$ii_max")")
+      fi
+    fi
   fi
 
   # Docker slice
@@ -138,6 +161,52 @@ print(f"{ready}/{len(items)}|{max_restart}|{worst}")
 ' 2>/dev/null
 }
 
+# --- inotify watches ---
+#
+# Both "too many watches" and "too many instances" surface to userspace as the
+# same misleading errno: ENOSPC ("No space left on device"). Watchpack/Next.js,
+# the Nx daemon, file-sync, and editors all consume inotify resources, and the
+# limits are per-user across every process. A stale dev daemon left running in
+# an idle worktree silently holds tens of thousands of watches until something
+# new can't start. The kernel exposes no global "in use" counter, so usage must
+# be summed from /proc; the scans are timeout-bounded so a huge /proc can't
+# stall the health loop.
+
+# find/grep legitimately exit non-zero here (permission-denied entries under
+# /proc, grep batches with no match), so under `set -o pipefail` the pipeline
+# reports failure even though wc produced a valid count. `|| true` swallows that
+# without appending output; the count is then sanitised to digits and defaulted.
+digits_or_zero() { local n; n=$(printf '%s' "$1" | tr -dc '0-9'); printf '%s' "${n:-0}"; }
+
+# Echo total inotify watches held across all processes (0 on failure/timeout).
+inotify_watches_used() {
+  local n
+  n=$( { timeout 6 find /proc -maxdepth 3 -path '/proc/[0-9]*/fdinfo/*' -type f \
+          -exec grep -h '^inotify ' {} + 2>/dev/null | wc -l; } 2>/dev/null || true )
+  digits_or_zero "$n"
+}
+
+# Echo total inotify instances (one per watcher fd) across all processes.
+inotify_instances_used() {
+  local n
+  n=$( { timeout 6 find /proc -maxdepth 3 -path '/proc/[0-9]*/fd/*' \
+          -lname 'anon_inode:inotify' 2>/dev/null | wc -l; } 2>/dev/null || true )
+  digits_or_zero "$n"
+}
+
+# Emit "watch_count pid" for the heaviest watch holders, descending. Per-pid
+# loop (cheap globs, no arg-list limit); only called from the full report.
+inotify_top() {
+  local d pid c
+  for d in /proc/[0-9]*; do
+    [ -d "$d/fdinfo" ] || continue
+    pid=${d#/proc/}
+    c=$( { grep -h '^inotify ' "$d"/fdinfo/* 2>/dev/null | wc -l; } 2>/dev/null || true )
+    c=$(digits_or_zero "$c")
+    [ "$c" -gt 0 ] 2>/dev/null && printf '%s %s\n' "$c" "$pid"
+  done | sort -rn | head -6
+}
+
 # --- Watch mode ---
 
 watch_mode() {
@@ -163,6 +232,48 @@ full_report() {
   section "Memory"
   free -h | awk 'NR<=3'
   printf "  min_free_kbytes: %s MB\n" "$(( $(cat /proc/sys/vm/min_free_kbytes) / 1024 ))"
+
+  # --- inotify watches ---
+  section "inotify watches"
+  if [ -r /proc/sys/fs/inotify/max_user_watches ]; then
+    iw_max=$(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo 0)
+    ii_max=$(cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo 0)
+    iw_used=$(inotify_watches_used)
+    ii_used=$(inotify_instances_used)
+    show_top=0
+    for pair in "watches:${iw_used:-0}:${iw_max:-0}" "instances:${ii_used:-0}:${ii_max:-0}"; do
+      label=${pair%%:*}
+      rest=${pair#*:}
+      used=${rest%%:*}
+      max=${rest#*:}
+      if [ "${max:-0}" -gt 0 ] 2>/dev/null; then
+        pct=$(( used * 100 / max ))
+        if [ "$pct" -ge "$INOTIFY_WARN_PCT" ]; then
+          col="${red}"
+          show_top=1
+        elif [ "$pct" -ge $(( INOTIFY_WARN_PCT - 20 )) ]; then
+          col="${yellow}"
+          show_top=1
+        else
+          col="${green}"
+        fi
+        printf "  %-10s ${col}%3d%%${reset}  (%d / %d)\n" "$label" "$pct" "$used" "$max"
+      else
+        printf "  %-10s ${yellow}unable to read limit${reset}\n" "$label"
+      fi
+    done
+    if [ "$show_top" -eq 1 ]; then
+      printf "  ${bold}top watch holders:${reset}\n"
+      inotify_top | while read -r cnt pid; do
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null || echo "?")
+        printf "    %7d  ${yellow}%-6s${reset} %-10s %s\n" "$cnt" "$pid" "$comm" "$cwd"
+      done
+      printf "  idle worktree daemons can be reclaimed with: ${bold}kill <pid>${reset} (they respawn on demand)\n"
+    fi
+  else
+    printf "  ${yellow}not available on this platform${reset}\n"
+  fi
 
   # --- Docker slice ---
   section "Docker slice"

@@ -20,7 +20,7 @@
 #   wt proxy [options] [N|off]           Route HTTPS proxy to a worktree
 #   wt ngrok [N|wtN|off]                Tunnel a worktree's port via ngrok
 #   wt ps [--all]                       Show running processes for current worktree
-#   wt kill [N|wtN|main]                Kill Next.js and Inngest for a worktree
+#   wt kill [N|wtN|main]                Kill Next.js, Inngest, and the Nx daemon for a worktree
 #   wt status                           Show project config, services, and database state
 #   wt db-cli --postgres|--clickhouse    Open interactive database shell for current worktree
 #   wt db-clone <N|wtN|main>            Drop current DBs and clone from another worktree
@@ -384,7 +384,7 @@ Commands:
   db-status                      Show database status for current worktree
   db-backup [label]              Backup current worktree's databases (optional label)
   db-restore [timestamp]         Restore databases from a backup (fzf picker if no arg)
-  kill [N|wtN|main]              Kill Next.js and Inngest processes for a worktree
+  kill [N|wtN|main]              Kill Next.js, Inngest, and the Nx daemon for a worktree
   help                           Show detailed documentation
 EOF
   exit 1
@@ -440,7 +440,8 @@ COMMANDS
   wt remove [N|wtN]
 
     Remove a worktree and drop its databases. Accepts a number (3) or
-    identifier (wt3). With no argument, opens an fzf picker.
+    identifier (wt3). With no argument, opens an fzf picker. Dev processes
+    (Next.js, Inngest, Nx daemon) are reaped before the directory is deleted.
 
     Use --merged to find and remove all worktrees whose PR has been merged
     on GitHub (works with squash merges). Worktrees with uncommitted changes
@@ -563,8 +564,11 @@ COMMANDS
 
   wt kill [N|wtN|main]
 
-    Kill the Next.js and Inngest dev processes for a worktree. Sends SIGTERM
-    to the process group and waits for a clean exit before force-killing.
+    Kill the Next.js and Inngest dev processes and the Nx daemon for a
+    worktree. Sends SIGTERM to the process group and waits for a clean exit
+    before force-killing. The Nx daemon respawns on the next nx invocation
+    (cache intact), so this is also the way to reclaim the inotify watches an
+    idle worktree's daemon holds.
 
     Examples:
       wt kill 3              # kill processes for wt3
@@ -966,6 +970,12 @@ remove_one() {
 
   echo -e "${BOLD}Removing worktree ${wt_id}${NC}"
   echo ""
+
+  # Reap dev processes before deleting the directory. The Nx daemon in
+  # particular keeps running against a now-deleted worktree, holding its
+  # inotify watches indefinitely, if it isn't killed first.
+  _kill_worktree_procs "$wt_dir" "$((3000 + n))"
+  (( WT_KILLED_COUNT > 0 )) && echo ""
 
   # Remove git worktree
   if git worktree list --porcelain | grep -q "^worktree ${wt_dir}$"; then
@@ -2758,10 +2768,16 @@ cmd_ps() {
 
 # Kill a process and its entire process group.
 # Sends SIGTERM to the process group, waits briefly, then SIGKILL if needed.
+# Always returns 0 on a successful reap: a process that is already gone, or
+# that exits cleanly during the wait, is the desired outcome — not a failure
+# the caller should propagate.
 _kill_proc_tree() {
   local pid="$1" label="$2"
   local pgid
-  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || return
+  # `| tr` masks ps's exit status, so test the value, not the pipeline status:
+  # an already-gone process has no pgid and is a successful no-op reap.
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+  [[ -z "$pgid" ]] && return 0
 
   echo -e "  ${label}: killing process group (pgid ${pgid})"
   kill -- -"$pgid" 2>/dev/null || kill "$pid" 2>/dev/null || true
@@ -2769,7 +2785,7 @@ _kill_proc_tree() {
   # Wait briefly for clean exit, then force-kill
   local i
   for i in 1 2 3; do
-    kill -0 "$pid" 2>/dev/null || return
+    kill -0 "$pid" 2>/dev/null || return 0
     sleep 0.5
   done
   kill -9 -- -"$pgid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
@@ -2788,6 +2804,54 @@ _kill_find_inngest_parent() {
       return
     fi
   done <<< "$pids"
+}
+
+# Find the Nx daemon belonging to a worktree. The daemon is a detached node
+# process (reparented to init) running nx/src/daemon/server/start.js with the
+# worktree path embedded; it holds tens of thousands of inotify watches and
+# never exits on its own, so an idle worktree leaks watches until something
+# new can't start. Killing it is safe — Nx respawns it on the next invocation
+# and the cache is left intact (unlike `nx reset`).
+_kill_find_nx_daemon() {
+  local wt_dir="$1"
+  local pids pid
+  pids=$(pgrep -f 'nx/src/daemon/server/start\.js' 2>/dev/null || true)
+  [[ -z "$pids" ]] && return
+  while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
+    if _pid_belongs_to_dir "$pid" "$wt_dir"; then
+      echo "$pid"
+      return
+    fi
+  done <<< "$pids"
+}
+
+# Kill every dev process belonging to a worktree: the Next.js dev server, the
+# Inngest dev process, and the Nx daemon. Sets WT_KILLED_COUNT to the number of
+# process groups signalled. Shared by `wt kill` and worktree removal so both
+# reap the Nx daemon (the inotify-watch hog that never exits on its own).
+_kill_worktree_procs() {
+  local wt_dir="$1" port="$2"
+  local pid
+  WT_KILLED_COUNT=0
+
+  pid=$(_ps_find_next_server "$wt_dir" "$port")
+  if [[ -n "$pid" ]]; then
+    _kill_proc_tree "$pid" "Next.js"
+    WT_KILLED_COUNT=$((WT_KILLED_COUNT + 1))
+  fi
+
+  pid=$(_kill_find_inngest_parent "$wt_dir")
+  if [[ -n "$pid" ]]; then
+    _kill_proc_tree "$pid" "Inngest"
+    WT_KILLED_COUNT=$((WT_KILLED_COUNT + 1))
+  fi
+
+  pid=$(_kill_find_nx_daemon "$wt_dir")
+  if [[ -n "$pid" ]]; then
+    _kill_proc_tree "$pid" "Nx daemon"
+    WT_KILLED_COUNT=$((WT_KILLED_COUNT + 1))
+  fi
 }
 
 cmd_kill() {
@@ -2826,25 +2890,9 @@ cmd_kill() {
     port=$((3000 + n))
   fi
 
-  local killed=0
+  _kill_worktree_procs "$wt_dir" "$port"
 
-  # Kill Next.js / dev server
-  local next_pid
-  next_pid=$(_ps_find_next_server "$wt_dir" "$port")
-  if [[ -n "$next_pid" ]]; then
-    _kill_proc_tree "$next_pid" "Next.js"
-    killed=$((killed + 1))
-  fi
-
-  # Kill Inngest
-  local inngest_pid
-  inngest_pid=$(_kill_find_inngest_parent "$wt_dir")
-  if [[ -n "$inngest_pid" ]]; then
-    _kill_proc_tree "$inngest_pid" "Inngest"
-    killed=$((killed + 1))
-  fi
-
-  if (( killed == 0 )); then
+  if (( WT_KILLED_COUNT == 0 )); then
     echo "No running processes found for ${arg}."
   else
     echo -e "${GREEN}Done.${NC}"
