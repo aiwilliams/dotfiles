@@ -130,14 +130,33 @@ caddy_reload() {
   fi
 }
 
+# Parse the live Caddyfile into structured route fields.
+# Echoes "domain|listen_port|upstream_host|upstream_port" and returns 0 when
+# Caddy is running with a parseable config; returns 1 otherwise.
+caddy_route() {
+  caddy_is_running && [[ -f "$CADDYFILE" ]] || return 1
+
+  local site upstream
+  # Site line, e.g. "opine.localhost:5443 {"
+  site=$(sed -n 's/^\([^ ]*\)  *{.*/\1/p' "$CADDYFILE" | head -1)
+  # reverse_proxy line, e.g. "    reverse_proxy fw:3006 {"
+  upstream=$(sed -n 's/.*reverse_proxy  *\([^ ]*\).*/\1/p' "$CADDYFILE" | head -1)
+  [[ -n "$site" && -n "$upstream" ]] || return 1
+
+  # Split on the last colon so domains keep any dots intact.
+  local domain="${site%:*}" listen_port="${site##*:}"
+  local upstream_host="${upstream%:*}" upstream_port="${upstream##*:}"
+  echo "${domain}|${listen_port}|${upstream_host}|${upstream_port}"
+}
+
 caddy_status() {
   if caddy_is_running; then
-    if [[ -f "$CADDYFILE" ]]; then
-      local upstream
-      upstream=$(sed -n 's/.*reverse_proxy  *\([^ ]*\).*/\1/p' "$CADDYFILE" 2>/dev/null || echo "unknown")
-      local domain
-      domain=$(sed -n 's/^\([^ ]*\)  *{.*/\1/p' "$CADDYFILE" | head -1)
-      echo "running: https://${domain} → ${upstream}"
+    local route
+    if route=$(caddy_route); then
+      local domain="${route%%|*}" rest="${route#*|}"
+      local listen_port="${rest%%|*}"; rest="${rest#*|}"
+      local upstream_host="${rest%%|*}" upstream_port="${rest##*|}"
+      echo "running: https://${domain}:${listen_port} → ${upstream_host}:${upstream_port}"
     else
       echo "running (no config)"
     fi

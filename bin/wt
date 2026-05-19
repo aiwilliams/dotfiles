@@ -1513,8 +1513,30 @@ HELP
     fi
   done
 
-  # No argument: show which worktree has the proxy
+  # No argument: show current routing. The live Caddy config is the source of
+  # truth — it may point at a remote host (e.g. a dev VM from a Mac), which no
+  # local .env scan would ever reveal.
   if [[ -z "$target" ]]; then
+    local route
+    if route=$(caddy_route); then
+      local r_domain="${route%%|*}" rest="${route#*|}"
+      local r_listen="${rest%%|*}"; rest="${rest#*|}"
+      local r_host="${rest%%|*}" r_port="${rest##*|}"
+      local label="${r_host}:${r_port}"
+      if [[ "$r_host" == "localhost" || "$r_host" == "127.0.0.1" ]]; then
+        # Local route: map the port back to a worktree id for a friendlier label.
+        for i in "${!all_ids[@]}"; do
+          if [[ "${all_ports[$i]}" == "$r_port" ]]; then
+            label="${all_ids[$i]}"
+            break
+          fi
+        done
+      fi
+      echo -e "${GREEN}https://${r_domain}:${r_listen}${NC} → ${label}"
+      return
+    fi
+
+    # Caddy isn't running — fall back to the local .env scan to show intent.
     local found=false
     for i in "${!all_ids[@]}"; do
       local env_file
@@ -1522,12 +1544,12 @@ HELP
       local domain
       domain=$(read_proxy_domain "$env_file")
       if [[ -n "$domain" ]]; then
-        echo -e "${GREEN}${all_ids[$i]}${NC} → ${domain}"
+        echo -e "${GREEN}${all_ids[$i]}${NC} → ${domain} ${YELLOW}(proxy stopped)${NC}"
         found=true
       fi
     done
     if [[ "$found" == false ]]; then
-      echo -e "${YELLOW}No worktree has PROXY_DOMAIN set.${NC}"
+      echo -e "${YELLOW}No proxy running and no worktree has PROXY_DOMAIN set.${NC}"
     fi
     return
   fi
