@@ -217,12 +217,30 @@ ngrok_status() {
   echo "  domain:  ${NGROK_DOMAIN:-(NGROK_DOMAIN not set)}"
 }
 
-# Human-readable uptime for a pid.
+# Human-readable uptime for a pid. Portable across macOS and Linux: parses
+# `ps -o etime=` ([[DD-]HH:]MM:SS), since macOS ps lacks the `etimes` keyword.
 _ngrok_uptime() {
   local pid="$1"
-  local elapsed
-  elapsed=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ') || { echo "?"; return; }
-  if [[ -z "$elapsed" ]]; then echo "?"; return; fi
+  local et
+  et=$(ps -o etime= -p "$pid" 2>/dev/null) || { echo "?"; return; }
+  et="${et//[[:space:]]/}"
+  [[ -n "$et" ]] || { echo "?"; return; }
+
+  local days=0
+  if [[ "$et" == *-* ]]; then
+    days="${et%%-*}"
+    et="${et#*-}"
+  fi
+  local hours=0 mins=0 secs=0
+  local -a parts
+  IFS=: read -ra parts <<< "$et"
+  case ${#parts[@]} in
+    3) hours="${parts[0]}" mins="${parts[1]}" secs="${parts[2]}" ;;
+    2) mins="${parts[0]}" secs="${parts[1]}" ;;
+    *) echo "?"; return ;;
+  esac
+
+  local elapsed=$(( 10#$days * 86400 + 10#$hours * 3600 + 10#$mins * 60 + 10#$secs ))
   if (( elapsed < 60 )); then
     echo "${elapsed}s"
   elif (( elapsed < 3600 )); then

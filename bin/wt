@@ -1450,7 +1450,8 @@ HELP
     fi
 
     if [[ -z "$target" ]]; then
-      echo -n "Proxy: "; caddy_status
+      echo "proxy:"
+      caddy_status
       return
     fi
 
@@ -1517,14 +1518,15 @@ HELP
   # truth — it may point at a remote host (e.g. a dev VM from a Mac), which no
   # local .env scan would ever reveal.
   if [[ -z "$target" ]]; then
+    echo "proxy:"
+
+    # Resolve a friendlier label (worktree id) for local routes.
+    local label=""
     local route
     if route=$(caddy_route); then
-      local r_domain="${route%%|*}" rest="${route#*|}"
-      local r_listen="${rest%%|*}"; rest="${rest#*|}"
+      local rest="${route#*|}"; rest="${rest#*|}"
       local r_host="${rest%%|*}" r_port="${rest##*|}"
-      local label="${r_host}:${r_port}"
       if [[ "$r_host" == "localhost" || "$r_host" == "127.0.0.1" ]]; then
-        # Local route: map the port back to a worktree id for a friendlier label.
         for i in "${!all_ids[@]}"; do
           if [[ "${all_ports[$i]}" == "$r_port" ]]; then
             label="${all_ids[$i]}"
@@ -1532,24 +1534,22 @@ HELP
           fi
         done
       fi
-      echo -e "${GREEN}https://${r_domain}:${r_listen}${NC} → ${label}"
-      return
     fi
 
-    # Caddy isn't running — fall back to the local .env scan to show intent.
-    local found=false
-    for i in "${!all_ids[@]}"; do
-      local env_file
-      env_file=$(env_file_for "${all_dirs[$i]}")
-      local domain
-      domain=$(read_proxy_domain "$env_file")
-      if [[ -n "$domain" ]]; then
-        echo -e "${GREEN}${all_ids[$i]}${NC} → ${domain} ${YELLOW}(proxy stopped)${NC}"
-        found=true
-      fi
-    done
-    if [[ "$found" == false ]]; then
-      echo -e "${YELLOW}No proxy running and no worktree has PROXY_DOMAIN set.${NC}"
+    caddy_status "$label"
+
+    # Proxy stopped: surface any worktree that still has PROXY_DOMAIN set, so a
+    # configured-but-not-routing intent isn't invisible.
+    if ! caddy_is_running; then
+      for i in "${!all_ids[@]}"; do
+        local env_file
+        env_file=$(env_file_for "${all_dirs[$i]}")
+        local domain
+        domain=$(read_proxy_domain "$env_file")
+        if [[ -n "$domain" ]]; then
+          echo "  config:  ${all_ids[$i]} → ${domain} (set in .env, not routing)"
+        fi
+      done
     fi
     return
   fi

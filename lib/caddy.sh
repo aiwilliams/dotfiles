@@ -149,18 +149,61 @@ caddy_route() {
   echo "${domain}|${listen_port}|${upstream_host}|${upstream_port}"
 }
 
+# Print current proxy status block. Mirrors ngrok_status() formatting.
+# $1 = optional route label to show instead of "host:port" (e.g. a worktree id)
 caddy_status() {
   if caddy_is_running; then
+    local pid uptime
+    pid=$(cat "$CADDY_PIDFILE" 2>/dev/null)
+    uptime=$(_caddy_uptime "$pid")
+
     local route
     if route=$(caddy_route); then
       local domain="${route%%|*}" rest="${route#*|}"
       local listen_port="${rest%%|*}"; rest="${rest#*|}"
       local upstream_host="${rest%%|*}" upstream_port="${rest##*|}"
-      echo "running: https://${domain}:${listen_port} → ${upstream_host}:${upstream_port}"
+      local label="${1:-${upstream_host}:${upstream_port}}"
+      echo "  status:  running"
+      echo "  route:   https://${domain}:${listen_port} → ${label}"
     else
-      echo "running (no config)"
+      echo "  status:  running (no config)"
     fi
+    echo "  pid:     ${pid} (up ${uptime})"
+    echo "  config:  ${CADDYFILE}"
   else
-    echo "stopped"
+    echo "  status:  stopped"
+  fi
+}
+
+# Human-readable uptime for a pid. Portable across macOS and Linux: parses
+# `ps -o etime=` ([[DD-]HH:]MM:SS), since macOS ps lacks the `etimes` keyword.
+_caddy_uptime() {
+  local pid="$1"
+  local et
+  et=$(ps -o etime= -p "$pid" 2>/dev/null) || { echo "?"; return; }
+  et="${et//[[:space:]]/}"
+  [[ -n "$et" ]] || { echo "?"; return; }
+
+  local days=0
+  if [[ "$et" == *-* ]]; then
+    days="${et%%-*}"
+    et="${et#*-}"
+  fi
+  local hours=0 mins=0 secs=0
+  local -a parts
+  IFS=: read -ra parts <<< "$et"
+  case ${#parts[@]} in
+    3) hours="${parts[0]}" mins="${parts[1]}" secs="${parts[2]}" ;;
+    2) mins="${parts[0]}" secs="${parts[1]}" ;;
+    *) echo "?"; return ;;
+  esac
+
+  local elapsed=$(( 10#$days * 86400 + 10#$hours * 3600 + 10#$mins * 60 + 10#$secs ))
+  if (( elapsed < 60 )); then
+    echo "${elapsed}s"
+  elif (( elapsed < 3600 )); then
+    echo "$(( elapsed / 60 ))m"
+  else
+    echo "$(( elapsed / 3600 ))h$(( (elapsed % 3600) / 60 ))m"
   fi
 }
