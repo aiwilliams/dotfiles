@@ -19,6 +19,7 @@
 #   wt agent-env                        Write .env.agent for current worktree
 #   wt proxy [options] [N|off]           Route HTTPS proxy to a worktree
 #   wt ngrok [N|wtN|off]                Tunnel a worktree's port via ngrok
+#   wt chrome-remote [...]              Bridge Chrome DevTools across a Mac/headless-VM pair
 #   wt ps [--all]                       Show running processes for current worktree
 #   wt kill [N|wtN|main]                Kill Next.js, Inngest, and the Nx daemon for a worktree
 #   wt status                           Show project config, services, and database state
@@ -48,6 +49,8 @@ source "$LIB_DIR/projects.sh"
 source "$LIB_DIR/caddy.sh"
 # shellcheck source=../lib/ngrok.sh
 source "$LIB_DIR/ngrok.sh"
+# shellcheck source=../lib/chrome-remote.sh
+source "$LIB_DIR/chrome-remote.sh"
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -376,6 +379,7 @@ Commands:
   agent-env                      Write .env.agent for current worktree
   proxy [options] [N|wtN|off]    Route HTTPS proxy to a worktree (show current if no arg)
   ngrok [options] [N|wtN|off]    Tunnel a worktree's port via ngrok (show status if no arg)
+  chrome-remote [opts] [action]  Bridge Chrome DevTools across a Mac/headless-VM pair
   merged                         Show worktrees whose branch PR has been merged
   status                         Show project config, services, and database state
   db-cli [--postgres|--clickhouse] [prefix]  Open interactive database shell
@@ -552,6 +556,49 @@ COMMANDS
       wt ngrok                        # show current tunnel status
       wt ngrok log                    # tail the ngrok log
       wt ngrok --host fw 6            # remote: tunnel to fw:3006
+
+  wt chrome-remote [options] [status|start|stop]
+
+    Bridge Chrome DevTools across a Mac/headless-VM pair so an agent on the
+    VM can drive Chrome on the Mac via the Chrome DevTools Protocol.
+
+    Run the same command on either machine — the local role is detected:
+
+      Mac (UI host):   launches Chrome with --remote-debugging-port using a
+                       dedicated ~/chrome-debug-profile (Chrome 136+ refuses
+                       remote debugging against the default profile), and
+                       opens an SSH reverse tunnel exposing that port on the
+                       headless VM as localhost:9222.
+
+      Headless Linux:  checks whether localhost:9222 is reachable, prints
+                       the chrome-devtools-mcp registration snippet, and
+                       shows the exact Mac-side command to wire things up
+                       when the bridge is down.
+
+    With no arguments, defaults to 'status'. When run on the Mac with no
+    --host, reads the upstream host from the live `wt proxy` Caddy config —
+    so once `wt proxy --host <vm> <id>` is configured, chrome-remote knows
+    where to reverse-tunnel.
+
+    Options:
+      --host <host>    Tailscale hostname of the headless VM (Mac only).
+                       Defaults to the upstream host in `wt proxy`'s live
+                       Caddy config, then $WT_CHROME_REMOTE_HOST, then
+                       "localhost" (which skips the tunnel).
+      --user <user>    SSH user on the headless VM. Defaults to $USER.
+      --port <N>       Local DevTools port. Defaults to 9222.
+      --domain <name>  Domain to print in the "Open in Chrome" URL. Defaults
+                       to the domain in `wt proxy`'s config, then
+                       $WT_CHROME_REMOTE_DOMAIN, then "opine.localhost".
+      --with-chrome    On `stop`, also kill the debug Chrome (default: leave
+                       it running — only the SSH tunnel is torn down).
+
+    Examples:
+      wt chrome-remote                       # status (auto-detected role)
+      wt chrome-remote start                 # mac: launch Chrome + tunnel
+      wt chrome-remote start --host fw       # mac: explicit target VM
+      wt chrome-remote stop                  # mac: drop SSH tunnel
+      wt chrome-remote stop --with-chrome    # mac: also kill Chrome
 
   wt ps [--all|-a]
 
@@ -2550,6 +2597,100 @@ HELP
   echo -e "${GREEN}https://${domain}${NC} → ${upstream_host}:${target_port}"
 }
 
+cmd_chrome_remote() {
+  local action=""
+  local host=""
+  local user="${USER}"
+  local port="$CHROME_REMOTE_PORT_DEFAULT"
+  local domain=""
+  local with_chrome=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        cat <<'HELP'
+Usage: wt chrome-remote [options] [status|start|stop]
+
+Bridge Chrome DevTools across a Mac/headless-VM pair. The role (mac vs.
+headless linux) is detected from the local OS and DISPLAY environment.
+
+Options:
+  --host <host>    Tailscale hostname of the headless VM (Mac only).
+                   Defaults to `wt proxy`'s upstream host, then
+                   $WT_CHROME_REMOTE_HOST, then "localhost".
+  --user <user>    SSH user on the headless VM. Defaults to $USER.
+  --port <N>       Local DevTools port. Defaults to 9222.
+  --domain <name>  Domain printed in the "Open in Chrome" URL. Defaults
+                   to `wt proxy`'s domain, then $WT_CHROME_REMOTE_DOMAIN,
+                   then "opine.localhost".
+  --with-chrome    On `stop`, also kill the debug Chrome process.
+
+See `wt help` for the full description.
+HELP
+        return
+        ;;
+      --host)        host="${2:-}";    [[ -z "$host"   ]] && { echo "--host requires a value" >&2; exit 1; }; shift 2 ;;
+      --user)        user="${2:-}";    [[ -z "$user"   ]] && { echo "--user requires a value" >&2; exit 1; }; shift 2 ;;
+      --port)        port="${2:-}";    [[ -z "$port"   ]] && { echo "--port requires a value" >&2; exit 1; }; shift 2 ;;
+      --domain)      domain="${2:-}";  [[ -z "$domain" ]] && { echo "--domain requires a value" >&2; exit 1; }; shift 2 ;;
+      --with-chrome) with_chrome=true; shift ;;
+      status|start|stop)
+        if [[ -n "$action" ]]; then
+          echo -e "${RED}Multiple actions: ${action} and $1${NC}" >&2
+          exit 1
+        fi
+        action="$1"; shift ;;
+      -*) echo -e "${RED}Unknown option: $1${NC}" >&2; exit 1 ;;
+      *)  echo -e "${RED}Unexpected argument: $1${NC}" >&2; exit 1 ;;
+    esac
+  done
+
+  action="${action:-status}"
+
+  if chrome_remote_is_mac; then
+    local listen_port=5443
+
+    # Pull defaults from the live Caddy config when the caller didn't override.
+    if [[ -z "$host" || -z "$domain" ]]; then
+      local route
+      if route=$(caddy_route 2>/dev/null); then
+        local r_domain="${route%%|*}" rest="${route#*|}"
+        local r_listen="${rest%%|*}"; rest="${rest#*|}"
+        local r_host="${rest%%|*}" _r_port="${rest##*|}"
+        [[ -z "$host"   ]] && host="$r_host"
+        [[ -z "$domain" ]] && domain="$r_domain"
+        listen_port="$r_listen"
+      fi
+    fi
+    [[ -z "$domain" ]] && domain="${WT_CHROME_REMOTE_DOMAIN:-$CHROME_REMOTE_DOMAIN_DEFAULT}"
+    [[ -z "$host"   ]] && host="${WT_CHROME_REMOTE_HOST:-localhost}"
+
+    case "$action" in
+      status) chrome_remote_mac_status "$host" "$user" "$port" "$domain" "$listen_port" ;;
+      start)  chrome_remote_mac_start  "$host" "$user" "$port" "$domain" "$listen_port" ;;
+      stop)   chrome_remote_mac_stop   "$host" "$user" "$port" "$with_chrome" ;;
+    esac
+    return
+  fi
+
+  if chrome_remote_is_headless_linux; then
+    case "$action" in
+      status) chrome_remote_linux_status "$port" "$user" ;;
+      start|stop)
+        echo -e "${YELLOW}'wt chrome-remote ${action}' must be run on the Mac.${NC}" >&2
+        echo "  This VM is the tunnel endpoint, not the initiator." >&2
+        echo "" >&2
+        chrome_remote_linux_status "$port" "$user"
+        ;;
+    esac
+    return
+  fi
+
+  echo -e "${RED}Unsupported environment for chrome-remote.${NC}" >&2
+  echo "  Expected macOS (UI host) or headless Linux (no \$DISPLAY)." >&2
+  exit 1
+}
+
 # --- Process status ---
 
 # Abbreviate a path: ~ for $HOME, single-char intermediate segments
@@ -2951,6 +3092,7 @@ case "$command" in
   agent-env)     cmd_agent_env ;;
   proxy)         cmd_proxy "$@" ;;
   ngrok)      cmd_ngrok "$@" ;;
+  chrome-remote) cmd_chrome_remote "$@" ;;
   db-cli)     cmd_db_cli "$@" ;;
   db-init)    cmd_db_init "$@" ;;
   db-clone)   cmd_db_clone "$@" ;;
