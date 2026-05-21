@@ -163,6 +163,15 @@ collect_alerts() {
     if [ "$oom_events" -gt 0 ]; then
       alerts+=("$(printf "${red}Kernel OOM: %d kill(s) in last 10 min${reset}" "$oom_events")")
     fi
+
+    # systemd-oomd kills whole cgroups when its memory+swap pressure thresholds
+    # trip — it runs ahead of the kernel OOM killer and ignores earlyoom's
+    # per-process avoid/prefer list. A noisy session-cNNN.scope (typically the
+    # SSH login + everything spawned from it) is the usual collateral damage.
+    oomd_kills=$(journalctl --since "10 minutes ago" --no-pager 2>/dev/null | grep -c "systemd-oomd.*Killed " || true)
+    if [ "$oomd_kills" -gt 0 ]; then
+      alerts+=("$(printf "${red}systemd-oomd: %d cgroup kill(s) in last 10 min${reset}" "$oomd_kills")")
+    fi
   else
     # macOS: jetsam is the OOM mechanism. Surface only sustained pressure.
     if [ "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)" -ge 2 ] 2>/dev/null; then
@@ -522,6 +531,29 @@ full_report() {
     journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep "Out of memory:" | tail -5 | sed 's/^/    /'
   else
     printf "  ${green}none${reset}\n"
+  fi
+
+  # --- systemd-oomd ---
+  # Reports kills made by systemd-oomd. Unlike earlyoom, which targets
+  # individual processes and respects an avoid/prefer regex, systemd-oomd
+  # selects whole cgroups by swap usage or PSI and kills them outright. When
+  # the heaviest cgroup happens to be the SSH login session scope, the
+  # connection itself is what dies — and the protections on tailscaled / sshd
+  # do not apply, because the kill is at the cgroup, not the process.
+  if systemctl list-unit-files systemd-oomd.service 2>/dev/null | grep -q systemd-oomd.service; then
+    section "systemd-oomd kills (last 24h)"
+    if systemctl is-active systemd-oomd &>/dev/null; then
+      oomd_kills=$(journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep -c "systemd-oomd.*Killed " || true)
+      if [ "$oomd_kills" -gt 0 ]; then
+        printf "  ${red}%d systemd-oomd kill(s)${reset}\n" "$oomd_kills"
+        journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep "systemd-oomd.*Killed " | tail -5 | sed 's/^/    /'
+        printf "  isolate dev servers in their own scope (${bold}scope <cmd>${reset}) so a kill spares the SSH session\n"
+      else
+        printf "  ${green}none${reset}\n"
+      fi
+    else
+      printf "  ${yellow}inactive${reset}\n"
+    fi
   fi
 
   # --- OOM protection ---

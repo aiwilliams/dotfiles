@@ -84,8 +84,9 @@ ln -sf "$SCRIPT_DIR/bin/wt" "$HOME/.local/bin/wt"
 ln -sf "$SCRIPT_DIR/bin/pg" "$HOME/.local/bin/pg"
 ln -sf "$SCRIPT_DIR/bin/cmux-ws" "$HOME/.local/bin/cmux-ws"
 ln -sf "$SCRIPT_DIR/bin/syshealth" "$HOME/.local/bin/syshealth"
+ln -sf "$SCRIPT_DIR/bin/scope" "$HOME/.local/bin/scope"
 ln -sf "$SCRIPT_DIR/bin/tsgo-shim" "$HOME/.local/bin/tsgo-shim"
-echo "Symlinked db-worktree, wt, pg, cmux-ws, syshealth, tsgo-shim to ~/.local/bin/"
+echo "Symlinked db-worktree, wt, pg, cmux-ws, syshealth, scope, tsgo-shim to ~/.local/bin/"
 
 # tmux config
 mkdir -p "$HOME/.config/tmux"

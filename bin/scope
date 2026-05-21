@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# scope — Run a command inside a per-invocation systemd user scope so an OOM
+# event kills only the command, not the SSH session that launched it.
+#
+# Without the wrap, a memory-hungry process inherits the SSH login session
+# cgroup (session-cNNN.scope). When systemd-oomd kills that scope under
+# memory+swap pressure it takes the SSH connection with it. Wrapped, the
+# command runs in user@.service/app.slice/run-*.scope — a sibling of the
+# session scope — so oomd picks the heavier sibling and the session survives.
+#
+# --max additionally caps the command's own memory; the cgroup OOM killer
+# then takes only this scope's processes when the cap is hit.
+#
+# On macOS or any system without systemd-run, scope is a transparent
+# pass-through so scripts using it stay portable.
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scope [OPTIONS] [--] CMD [ARG...]
+
+Options:
+  --max=SIZE        MemoryMax=SIZE — hard cap; kernel OOMs the scope if exceeded
+  --high=SIZE       MemoryHigh=SIZE — soft throttle; kernel slows allocations
+  --swap-max=SIZE   MemorySwapMax=SIZE — cap on per-scope swap use
+  --name=NAME       Cgroup unit "scope-NAME-PID.scope" (default: auto-generated)
+  -h, --help        Show this help
+
+SIZE accepts the same syntax as systemd: 12G, 8192M, 500K, or "infinity".
+
+Examples:
+  scope pnpm dev
+  scope --max=12G --high=8G pnpm dev
+  scope --max=16G --name=next-dev pnpm dev-only
+EOF
+}
+
+declare -a props=()
+name=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max=*)      props+=("MemoryMax=${1#--max=}"); shift ;;
+    --high=*)     props+=("MemoryHigh=${1#--high=}"); shift ;;
+    --swap-max=*) props+=("MemorySwapMax=${1#--swap-max=}"); shift ;;
+    --name=*)     name="${1#--name=}"; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    --)           shift; break ;;
+    --*)          printf 'scope: unknown flag: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    *)            break ;;
+  esac
+done
+
+if [[ $# -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+if [[ "$(uname -s)" != Linux ]] || ! command -v systemd-run >/dev/null 2>&1; then
+  exec "$@"
+fi
+
+run=(systemd-run --user --scope --quiet --collect)
+[[ -n "$name" ]] && run+=(--unit="scope-${name}-$$.scope")
+if [[ ${#props[@]} -gt 0 ]]; then
+  for p in "${props[@]}"; do
+    run+=(--property="$p")
+  done
+fi
+exec "${run[@]}" -- "$@"
