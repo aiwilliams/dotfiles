@@ -51,6 +51,34 @@ wt() {
   esac
 }
 
+# Launch claude inside a per-invocation systemd user scope on Linux so
+# systemd-oomd can kill an OOM-heavy claude without taking down the SSH
+# session scope it was launched from. On any other OS — or anywhere
+# systemd-run is unavailable — this is a transparent pass-through.
+#
+# Without the wrap on Linux, claude inherits the SSH login session's
+# cgroup (session-cNNN.scope). Under SwapUsedLimit pressure, oomd ranks
+# descendants of user-1000.slice by swap usage and kills the worst
+# scope wholesale, taking the SSH connection down with claude. Wrapped,
+# claude runs in user@.service/app.slice/run-*.scope — a sibling of
+# the session scope, so oomd picks the heavier scope (claude) and the
+# SSH session survives with the prompt returning in the same TTY.
+#
+# A function is used rather than a PATH-prepended wrapper script
+# because `mise activate zsh` (sourced below) restores PATH from a
+# captured snapshot on every shell re-init, dropping any prepends made
+# in .zshenv. Functions take precedence over PATH lookup in all shell
+# contexts, so this survives `omz reload` and re-execs cleanly.
+claude() {
+  local bin
+  bin=$(whence -p claude) || { print -u2 "claude: command not found"; return 127 }
+  if [[ "$(uname -s)" != Linux ]] || ! command -v systemd-run >/dev/null 2>&1; then
+    "$bin" "$@"
+    return
+  fi
+  systemd-run --user --scope --quiet --collect -- "$bin" "$@"
+}
+
 # --- Platform-specific ---
 
 case "$(uname -s)" in
