@@ -2,9 +2,14 @@
 # syshealth — Quick system health overview focused on memory, OOM, and network.
 #
 # Usage:
-#   syshealth            Full status report
-#   syshealth watch      Loop every 60s, only print + bell on problems
-#   syshealth watch 30   Loop every 30s
+#   syshealth                 Full status report
+#   syshealth watch           Loop every 60s, only print + bell on problems
+#   syshealth watch 30        Loop every 30s
+#   syshealth oom             Detailed OOM forensics: oomd policy, heaviest
+#                             user scopes, and recent kills decoded
+#   syshealth oom-record [s]  Sample per-scope mem/swap to a CSV every [s]s
+#                             (default 10); on a fresh oomd/kernel kill, bell
+#                             and dump the samples leading up to it
 #   (Use `wt ps` for next-server / inngest / database process info)
 
 set -euo pipefail
@@ -294,6 +299,167 @@ inotify_top() {
   done | sort -rn | head -6
 }
 
+# --- OOM forensics (Linux) ---
+#
+# systemd-oomd kills whole cgroups from userspace and logs only the cgroup
+# path plus aggregate memory/swap % — no per-process dump like the kernel OOM
+# killer, and the victim cgroup's memory.events oom_kill counter stays 0 (the
+# SIGKILL is userspace, not a cgroup-OOM event). The forensic detail it
+# withholds has to be reconstructed from per-scope cgroup accounting, which is
+# what these helpers expose. `scope`-wrapped commands (claude sessions, dev
+# servers) live as transient *.scope cgroups under this user's app.slice.
+
+# Absolute path to this user's app.slice (empty string if it doesn't exist).
+oom_app_slice() {
+  local uid; uid=$(id -u)
+  printf '/sys/fs/cgroup/user.slice/user-%s.slice/user@%s.service/app.slice' "$uid" "$uid"
+}
+
+# Emit one line per app.slice scope, sorted by swap then memory descending:
+#   "<swap_bytes> <mem_bytes> <mem_peak_bytes> <swap_peak_bytes> <unit> <cwd>"
+# cwd comes from the scope's first process, tracing a scope to the worktree /
+# session that owns it. memory.peak / memory.swap.peak are high-water marks
+# that survive after a spike subsides — the only record of a transient balloon.
+oom_app_scopes() {
+  local base; base=$(oom_app_slice)
+  [ -d "$base" ] || return 0
+  local d unit cur peak sw swpk firstpid cwd
+  for d in "$base"/*.scope; do
+    [ -d "$d" ] || continue
+    unit=$(basename "$d")
+    cur=$(cat "$d/memory.current" 2>/dev/null || echo 0)
+    peak=$(cat "$d/memory.peak" 2>/dev/null || echo 0)
+    sw=$(cat "$d/memory.swap.current" 2>/dev/null || echo 0)
+    swpk=$(cat "$d/memory.swap.peak" 2>/dev/null || echo 0)
+    firstpid=$(head -n1 "$d/cgroup.procs" 2>/dev/null || true)
+    cwd="?"
+    [ -n "${firstpid:-}" ] && cwd=$(readlink "/proc/$firstpid/cwd" 2>/dev/null || echo "?")
+    printf '%s %s %s %s %s %s\n' "${sw:-0}" "${cur:-0}" "${peak:-0}" "${swpk:-0}" "$unit" "$cwd"
+  done | sort -rn
+}
+
+# Bytes -> "N.NG" for compact columns.
+oom_gb() { awk "BEGIN{printf \"%.1fG\", ${1:-0}/1073741824}"; }
+
+# Shorten an oomd/kernel kill line by stripping the long per-user cgroup
+# prefix so the surviving "app.slice/scope-claude-NNN.scope" is legible.
+oom_shorten() { sed 's#/user\.slice/user-[0-9]*\.slice/user@[0-9]*\.service/##g'; }
+
+# Emit OOM kill log lines since <since> (any journalctl --since expression):
+# systemd-oomd cgroup kills first, then kernel OOM-killer per-process kills.
+# Filtered by identifier (-t) and kernel (-k) so it stays fast even when the
+# journal is huge — a plain 24h scan can take seconds.
+oom_recent_kills() {
+  local since="$1"
+  { journalctl -t systemd-oomd --since "$since" --no-pager 2>/dev/null | grep "Killed " || true; }
+  { journalctl -k --since "$since" --no-pager 2>/dev/null | grep "Out of memory: Killed process" || true; }
+}
+
+oom_detail() {
+  if [ "$OS" != Linux ]; then
+    printf "${yellow}oom detail is Linux-only${reset}\n"
+    return 0
+  fi
+
+  section "systemd-oomd policy"
+  if command -v oomctl >/dev/null 2>&1; then
+    oomctl 2>/dev/null \
+      | grep -E 'Swap Used Limit:|Default Memory Pressure Limit:|Memory: Used:|Swap: Used:' \
+      | sed 's/^[[:space:]]*/  /'
+  else
+    printf "  ${yellow}oomctl not available${reset}\n"
+  fi
+  printf "  ${yellow}rule:${reset} when system swap exceeds the limit, oomd kills the\n"
+  printf "  user.slice descendant holding the most swap. Bounding per-scope swap\n"
+  printf "  keeps any one session from becoming that victim.\n"
+
+  section "Heaviest user scopes (swap, then memory)"
+  if [ -d "$(oom_app_slice)" ]; then
+    printf "  ${bold}%-30s %8s %8s %9s %9s  %s${reset}\n" \
+      "scope" "swap" "mem" "mem-peak" "swp-peak" "cwd"
+    oom_app_scopes | head -12 | while read -r sw cur peak swpk unit cwd; do
+      col="${green}"
+      [ "${sw:-0}" -gt 536870912 ] 2>/dev/null && col="${yellow}"
+      [ "${sw:-0}" -gt 2147483648 ] 2>/dev/null && col="${red}"
+      printf "  ${col}%-30s${reset} %8s %8s %9s %9s  %s\n" \
+        "${unit%.scope}" \
+        "$(oom_gb "$sw")" "$(oom_gb "$cur")" "$(oom_gb "$peak")" "$(oom_gb "$swpk")" \
+        "$cwd"
+    done
+  else
+    printf "  ${yellow}no app.slice (no scope-wrapped sessions running?)${reset}\n"
+  fi
+
+  section "Recent OOM kills (last 24h)"
+  local found=0 kern oomd
+  kern=$(journalctl -k --since "24 hours ago" --no-pager 2>/dev/null \
+    | grep "Out of memory: Killed process" | tail -8 || true)
+  if [ -n "$kern" ]; then
+    found=1
+    printf "  ${bold}kernel OOM killer (per-process):${reset}\n"
+    printf '%s\n' "$kern" | sed 's/^/    /'
+  fi
+  oomd=$(journalctl -t systemd-oomd --since "24 hours ago" --no-pager 2>/dev/null \
+    | grep "Killed " | tail -8 || true)
+  if [ -n "$oomd" ]; then
+    found=1
+    printf "  ${bold}systemd-oomd (cgroup, no per-process detail):${reset}\n"
+    printf '%s\n' "$oomd" | oom_shorten | sed 's/^/    /'
+  fi
+  [ "$found" -eq 0 ] && printf "  ${green}none in last 24h${reset}\n"
+
+  printf "\n  ${bold}capture the growth curve to a file:${reset} syshealth oom-record [interval_s]\n"
+}
+
+# Background sampler: append per-scope mem/swap to a CSV ring buffer so a
+# post-mortem growth curve survives a kill (oomd keeps no pre-kill history).
+# On a fresh kill it bells and dumps the samples leading up to it.
+oom_record() {
+  if [ "$OS" != Linux ]; then
+    printf "${yellow}oom-record is Linux-only${reset}\n"
+    return 0
+  fi
+  local interval="${1:-10}"
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/syshealth"
+  mkdir -p "$dir"
+  local log="$dir/cgroup-mem.csv"
+  local maxlines=50000
+  printf "Recording app.slice scope mem/swap every %ss to:\n  %s\n" "$interval" "$log"
+  printf "On a fresh oomd/kernel kill: bell + dump the run-up samples. Ctrl-C to stop.\n\n"
+  [ -s "$log" ] || printf 'epoch,unit,mem_bytes,swap_bytes,mem_peak_bytes,cwd\n' > "$log"
+
+  # Track kills by line content (deduped) rather than a count, so a slow or
+  # rotated journal can't cause a miss or a false re-alert. Seed with the last
+  # 15 min so pre-existing kills don't fire on startup.
+  local seen; seen=$(mktemp)
+  oom_recent_kills "15 minutes ago" | sort -u > "$seen" || true
+
+  local ts lines fresh
+  while true; do
+    ts=$(date +%s)
+    oom_app_scopes | while read -r sw cur peak swpk unit cwd; do
+      printf '%s,%s,%s,%s,%s,%s\n' "$ts" "$unit" "$cur" "$sw" "$peak" "$cwd" >> "$log"
+    done
+    lines=$(wc -l < "$log" 2>/dev/null || echo 0)
+    if [ "${lines:-0}" -gt "$maxlines" ]; then
+      tail -n $((maxlines / 2)) "$log" > "$log.tmp" && mv "$log.tmp" "$log"
+    fi
+
+    # Any kill line not already seen is a fresh kill.
+    fresh=$(oom_recent_kills "15 minutes ago" | grep -vxF -f "$seen" || true)
+    if [ -n "$fresh" ]; then
+      bell
+      printf "\n${bold}${red}── OOM KILL detected %s${reset}\n" "$(date '+%H:%M:%S')"
+      printf '%s\n' "$fresh" | oom_shorten | sed 's/^/  /'
+      printf "  ${bold}last samples before the kill:${reset}\n"
+      tail -n 24 "$log" | sed 's/^/    /'
+      oom_recent_kills "15 minutes ago" | sort -u > "$seen" || true
+    fi
+    sleep "$interval"
+  done
+  rm -f "$seen"
+}
+
 # --- Watch mode ---
 
 watch_mode() {
@@ -548,6 +714,7 @@ full_report() {
         printf "  ${red}%d systemd-oomd kill(s)${reset}\n" "$oomd_kills"
         journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep "systemd-oomd.*Killed " | tail -5 | sed 's/^/    /'
         printf "  isolate dev servers in their own scope (${bold}scope <cmd>${reset}) so a kill spares the SSH session\n"
+        printf "  forensics — policy, heaviest scopes, decoded kills: ${bold}syshealth oom${reset}\n"
       else
         printf "  ${green}none${reset}\n"
       fi
@@ -592,6 +759,8 @@ full_report() {
 # --- Main ---
 
 case "${1:-}" in
-  watch) watch_mode "${2:-60}" ;;
-  *)     full_report ;;
+  watch)      watch_mode "${2:-60}" ;;
+  oom)        oom_detail ;;
+  oom-record) oom_record "${2:-10}" ;;
+  *)          full_report ;;
 esac
