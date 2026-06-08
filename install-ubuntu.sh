@@ -154,9 +154,12 @@ fi
 # --avoid: kill these only as a last resort (subtracts 300 from oom_score).
 #   Killing the postgres parent or the JetBrains Remote Dev backend ("idea")
 #   takes down the whole DB / IDE session, so they're protected but still killable
-#   if it's the only way to keep tailscaled+sshd alive.
+#   if it's the only way to keep tailscaled+sshd alive. "claude" (Claude Code,
+#   comm=claude) is protected the same way — it is itself a node process, so
+#   without this guard --prefer would target long-running interactive sessions
+#   first; runaway build/dev node processes stay in --prefer and die before it.
 EARLYOOM_CONF="/etc/default/earlyoom"
-EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 3,1 -s 5,2 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea)\$' --prefer '^(next-server|node|tsgo|chrome|firefox)\$' -n\""
+EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 3,1 -s 5,2 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea|claude)\$' --prefer '^(next-server|node|tsgo|chrome|firefox)\$' -n\""
 if [ ! -f "$EARLYOOM_CONF" ] || ! diff -q <(echo "$EARLYOOM_DESIRED") "$EARLYOOM_CONF" &>/dev/null; then
   echo "Configuring earlyoom..."
   echo "$EARLYOOM_DESIRED" | sudo tee "$EARLYOOM_CONF" > /dev/null
