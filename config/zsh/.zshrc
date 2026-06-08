@@ -52,31 +52,62 @@ wt() {
 }
 
 # Launch claude inside a per-invocation systemd user scope on Linux so
-# systemd-oomd can kill an OOM-heavy claude without taking down the SSH
-# session scope it was launched from. On any other OS — or anywhere
-# systemd-run is unavailable — this is a transparent pass-through.
+# systemd-oomd kills only this session's scope, never the SSH login
+# session it was launched from. On any other OS — or anywhere the `scope`
+# helper / systemd-run is unavailable — this is a transparent pass-through.
 #
-# Without the wrap on Linux, claude inherits the SSH login session's
-# cgroup (session-cNNN.scope). Under SwapUsedLimit pressure, oomd ranks
-# descendants of user-1000.slice by swap usage and kills the worst
-# scope wholesale, taking the SSH connection down with claude. Wrapped,
-# claude runs in user@.service/app.slice/run-*.scope — a sibling of
-# the session scope, so oomd picks the heavier scope (claude) and the
-# SSH session survives with the prompt returning in the same TTY.
+# Without the wrap, claude inherits the SSH login session's cgroup
+# (session-cNNN.scope). Under SwapUsedLimit pressure, oomd ranks
+# descendants of user-NNNN.slice by swap usage and kills the worst scope
+# wholesale, taking the SSH connection down with claude. Wrapped, claude
+# runs in user@.service/app.slice/scope-claude-PID.scope — a sibling of
+# the session scope — so oomd picks the heavier claude scope and the SSH
+# session survives, prompt returning in the same TTY. The named scope is
+# also self-identifying in oomctl, systemd-cgtop, and oomd kill logs.
 #
-# A function is used rather than a PATH-prepended wrapper script
-# because `mise activate zsh` (sourced below) restores PATH from a
-# captured snapshot on every shell re-init, dropping any prepends made
-# in .zshenv. Functions take precedence over PATH lookup in all shell
-# contexts, so this survives `omz reload` and re-execs cleanly.
+# Memory posture (override any of these via the environment):
+#   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE (default 60) — compact the in-memory
+#     transcript at this % of the context window instead of the ~95%
+#     default. The 1M Opus window otherwise lets the node heap grow huge
+#     before its first compaction; lower trades more frequent summarization
+#     for a smaller resident heap. The CLI only honours values that LOWER
+#     the threshold.
+#   CLAUDE_SCOPE_SWAP_MAX (default 512M) — MemorySwapMax per scope. Caps
+#     how much swap one session can hold so no single session can fill the
+#     small system swap and trip oomd's SwapUsedLimit (the cause of past
+#     kills); a bloated session stays in plentiful RAM instead of swapping.
+#   CLAUDE_SCOPE_MEMORY_HIGH (default 32G) — MemoryHigh per scope. Soft
+#     throttle: the kernel reclaims and slows allocations past this but
+#     never kills.
+#   CLAUDE_SCOPE_MEMORY_MAX (unset) — MemoryMax per scope. Left unset so an
+#     active session is never hard-killed; set it (e.g. 40G) only to add a
+#     kernel backstop against a pathological runaway.
+#
+# A function is used rather than a PATH-prepended wrapper script because
+# `mise activate zsh` (sourced below) restores PATH from a captured
+# snapshot on every shell re-init, dropping any prepends made in .zshenv.
+# Functions take precedence over PATH lookup in all shell contexts, so
+# this survives `omz reload` and re-execs cleanly.
 claude() {
   local bin
   bin=$(whence -p claude) || { print -u2 "claude: command not found"; return 127 }
-  if [[ "$(uname -s)" != Linux ]] || ! command -v systemd-run >/dev/null 2>&1; then
+
+  # local -x: exported to the launched process for this call only, so it
+  # does not linger in the interactive shell after claude exits.
+  local -x CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-60}"
+
+  if [[ "$(uname -s)" != Linux ]] || ! command -v scope >/dev/null 2>&1; then
     "$bin" "$@"
     return
   fi
-  systemd-run --user --scope --quiet --collect -- "$bin" "$@"
+
+  local -a caps=(
+    --name=claude
+    "--high=${CLAUDE_SCOPE_MEMORY_HIGH:-32G}"
+    "--swap-max=${CLAUDE_SCOPE_SWAP_MAX:-512M}"
+  )
+  [[ -n "${CLAUDE_SCOPE_MEMORY_MAX:-}" ]] && caps+=("--max=${CLAUDE_SCOPE_MEMORY_MAX}")
+  scope "${caps[@]}" -- "$bin" "$@"
 }
 
 # --- Platform-specific ---
