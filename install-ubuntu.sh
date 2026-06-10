@@ -114,15 +114,36 @@ fi
 #      backstop won't take them either.
 
 # Layer 1: systemd-oomd PSI-based monitoring.
+# 80% sustained pressure for 20s before acting. The earlier 60% (and the
+# distro's 50% on user@.service, see below) fired on transient swap-thrash
+# spikes during ordinary builds while tens of GB of RAM were still available —
+# a pressure stall is not the same as memory exhaustion. earlyoom + the kernel
+# remain the real out-of-memory backstops.
 OOMD_CONF="/etc/systemd/oomd.conf.d/00-tuning.conf"
 OOMD_CONF_DESIRED="[OOM]
 SwapUsedLimit=95%
-DefaultMemoryPressureLimit=60%
+DefaultMemoryPressureLimit=80%
 DefaultMemoryPressureDurationSec=20s"
 if [ ! -f "$OOMD_CONF" ] || ! diff -q <(echo "$OOMD_CONF_DESIRED") "$OOMD_CONF" &>/dev/null; then
   echo "Configuring systemd-oomd thresholds..."
   sudo mkdir -p /etc/systemd/oomd.conf.d
   echo "$OOMD_CONF_DESIRED" | sudo tee "$OOMD_CONF" > /dev/null
+fi
+
+# Override the distro default that hard-sets ManagedOOMMemoryPressureLimit=50%
+# on every user@.service (/usr/lib/systemd/system/user@.service.d/
+# 10-oomd-user-service-defaults.conf). That per-unit limit shadows
+# DefaultMemoryPressureLimit above, so without this drop-in oomd still kills the
+# heaviest-reclaim scope under the login session at 50% — the cause of the
+# claude-session kills. 99- sorts after the distro's 10- so it wins.
+USER_SERVICE_OOMD="/etc/systemd/system/user@.service.d/99-oomd-pressure.conf"
+USER_SERVICE_OOMD_DESIRED="[Service]
+ManagedOOMMemoryPressureLimit=80%"
+if [ ! -f "$USER_SERVICE_OOMD" ] || ! diff -q <(echo "$USER_SERVICE_OOMD_DESIRED") "$USER_SERVICE_OOMD" &>/dev/null; then
+  echo "Raising user@.service oomd pressure limit to 80%..."
+  sudo mkdir -p /etc/systemd/system/user@.service.d
+  echo "$USER_SERVICE_OOMD_DESIRED" | sudo tee "$USER_SERVICE_OOMD" > /dev/null
+  sudo systemctl daemon-reload
 fi
 
 # Opt user.slice into oomd management. Without this, oomd does nothing — the

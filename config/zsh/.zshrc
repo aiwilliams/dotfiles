@@ -72,16 +72,30 @@ wt() {
 #     before its first compaction; lower trades more frequent summarization
 #     for a smaller resident heap. The CLI only honours values that LOWER
 #     the threshold.
-#   CLAUDE_SCOPE_SWAP_MAX (default 512M) — MemorySwapMax per scope. Caps
-#     how much swap one session can hold so no single session can fill the
-#     small system swap and trip oomd's SwapUsedLimit (the cause of past
-#     kills); a bloated session stays in plentiful RAM instead of swapping.
+#   CLAUDE_SCOPE_SWAP_MAX (unset → no per-scope cap) — MemorySwapMax per scope.
+#     Left uncapped so the kernel can offload claude's cold (anonymous) heap
+#     pages to swap under pressure, shrinking its resident set and lowering the
+#     reclaim activity that a systemd-oomd *pressure* kill ranks victims on. An
+#     earlier 512M cap pinned that heap in RAM (anon pages have nowhere to go
+#     but swap), which inflated claude's pressure signature and made it the
+#     pressure-kill victim — every observed kill was pressure-based. The swap-hog
+#     protection the cap was meant to provide (not being oomd's swap-kill target)
+#     now comes directly from ManagedOOMPreference=avoid below, which covers both
+#     swap and pressure kills. Set e.g. 4G only if several concurrent sessions
+#     start filling the small system swap and provoking collateral swap-kills.
 #   CLAUDE_SCOPE_MEMORY_HIGH (default 32G) — MemoryHigh per scope. Soft
 #     throttle: the kernel reclaims and slows allocations past this but
 #     never kills.
 #   CLAUDE_SCOPE_MEMORY_MAX (unset) — MemoryMax per scope. Left unset so an
 #     active session is never hard-killed; set it (e.g. 40G) only to add a
 #     kernel backstop against a pathological runaway.
+#   CLAUDE_OOMD_PREFERENCE (default avoid) — ManagedOOMPreference on the scope.
+#     systemd-oomd ignores earlyoom's name lists and a *pressure* kill targets
+#     the heaviest-reclaim cgroup, which is usually this interactive session
+#     rather than a larger idle dev server. "avoid" demotes claude below
+#     un-marked sibling scopes so a dev server / build is killed first; "omit"
+#     makes claude entirely ineligible (it thrashes instead — relies on the
+#     MemoryMax/earlyoom/kernel backstop); "none" opts out.
 #
 # A function is used rather than a PATH-prepended wrapper script because
 # `mise activate zsh` (sourced below) restores PATH from a captured
@@ -104,8 +118,12 @@ claude() {
   local -a caps=(
     --name=claude
     "--high=${CLAUDE_SCOPE_MEMORY_HIGH:-32G}"
-    "--swap-max=${CLAUDE_SCOPE_SWAP_MAX:-512M}"
   )
+  case "${CLAUDE_OOMD_PREFERENCE:-avoid}" in
+    avoid) caps+=(--oom-avoid) ;;
+    omit)  caps+=(--oom-omit) ;;
+  esac
+  [[ -n "${CLAUDE_SCOPE_SWAP_MAX:-}" ]] && caps+=("--swap-max=${CLAUDE_SCOPE_SWAP_MAX}")
   [[ -n "${CLAUDE_SCOPE_MEMORY_MAX:-}" ]] && caps+=("--max=${CLAUDE_SCOPE_MEMORY_MAX}")
   scope "${caps[@]}" -- "$bin" "$@"
 }

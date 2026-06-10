@@ -11,6 +11,13 @@
 # --max additionally caps the command's own memory; the cgroup OOM killer
 # then takes only this scope's processes when the cap is hit.
 #
+# --oom-avoid / --oom-omit set ManagedOOMPreference, which is the *only* lever
+# systemd-oomd honors when choosing a victim (it ignores earlyoom's
+# --avoid/--prefer name lists). A pressure kill ranks descendants by reclaim
+# activity, not RSS, so an actively-allocating interactive scope is often
+# picked over a larger-but-idle one; --oom-avoid demotes it below un-marked
+# siblings (e.g. dev servers) so those die first.
+#
 # On macOS or any system without systemd-run, scope is a transparent
 # pass-through so scripts using it stay portable.
 
@@ -24,6 +31,10 @@ Options:
   --max=SIZE        MemoryMax=SIZE — hard cap; kernel OOMs the scope if exceeded
   --high=SIZE       MemoryHigh=SIZE — soft throttle; kernel slows allocations
   --swap-max=SIZE   MemorySwapMax=SIZE — cap on per-scope swap use
+  --oom-avoid       ManagedOOMPreference=avoid — oomd kills this scope last,
+                    only when no un-marked sibling can relieve pressure
+  --oom-omit        ManagedOOMPreference=omit — oomd never kills this scope
+                    (it thrashes rather than dies; pairs with a kernel backstop)
   --name=NAME       Cgroup unit "scope-NAME-PID.scope" (default: auto-generated)
   -h, --help        Show this help
 
@@ -44,6 +55,8 @@ while [[ $# -gt 0 ]]; do
     --max=*)      props+=("MemoryMax=${1#--max=}"); shift ;;
     --high=*)     props+=("MemoryHigh=${1#--high=}"); shift ;;
     --swap-max=*) props+=("MemorySwapMax=${1#--swap-max=}"); shift ;;
+    --oom-avoid)  props+=("ManagedOOMPreference=avoid"); shift ;;
+    --oom-omit)   props+=("ManagedOOMPreference=omit"); shift ;;
     --name=*)     name="${1#--name=}"; shift ;;
     -h|--help)    usage; exit 0 ;;
     --)           shift; break ;;
