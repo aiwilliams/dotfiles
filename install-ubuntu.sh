@@ -79,28 +79,36 @@ sudo update-locale LANG=en_US.UTF-8
 
 # --- OOM protection (keep SSH/Tailscale alive under memory pressure) ---
 
-# Protect tailscaled from OOM killer
+# Protect tailscaled from BOTH out-of-memory killers. tailscaled is the lifeline
+# — it serves Tailscale SSH, so if it dies the box is unreachable.
+#   OOMScoreAdjust=-900     — tells the *kernel* OOM killer to spare it.
+#   ManagedOOMPreference=omit — tells *systemd-oomd* to never pick it. oomd
+#     ignores OOMScoreAdjust entirely; this xattr is the only lever it honours.
+#     tailscaled lives in system.slice, which oomd does not currently monitor,
+#     so this is belt-and-suspenders — it stays protected even if oomd is later
+#     pointed at system.slice or the root cgroup.
 TAILSCALED_OVERRIDE="/etc/systemd/system/tailscaled.service.d/oom-protect.conf"
-if [ ! -f "$TAILSCALED_OVERRIDE" ]; then
-  echo "Protecting tailscaled from OOM killer..."
-  sudo mkdir -p /etc/systemd/system/tailscaled.service.d
-  cat <<'UNIT' | sudo tee "$TAILSCALED_OVERRIDE" > /dev/null
-[Service]
+TAILSCALED_OVERRIDE_DESIRED="[Service]
 OOMScoreAdjust=-900
-UNIT
+ManagedOOMPreference=omit"
+if [ ! -f "$TAILSCALED_OVERRIDE" ] || ! diff -q <(echo "$TAILSCALED_OVERRIDE_DESIRED") "$TAILSCALED_OVERRIDE" &>/dev/null; then
+  echo "Protecting tailscaled from OOM killers..."
+  sudo mkdir -p /etc/systemd/system/tailscaled.service.d
+  echo "$TAILSCALED_OVERRIDE_DESIRED" | sudo tee "$TAILSCALED_OVERRIDE" > /dev/null
   sudo systemctl daemon-reload
   sudo systemctl restart tailscaled
 fi
 
-# Protect sshd from OOM killer
+# Protect sshd the same way (the fallback path when not reaching the box over
+# Tailscale SSH).
 SSHD_OVERRIDE="/etc/systemd/system/ssh.service.d/oom-protect.conf"
-if [ ! -f "$SSHD_OVERRIDE" ]; then
-  echo "Protecting sshd from OOM killer..."
-  sudo mkdir -p /etc/systemd/system/ssh.service.d
-  cat <<'UNIT' | sudo tee "$SSHD_OVERRIDE" > /dev/null
-[Service]
+SSHD_OVERRIDE_DESIRED="[Service]
 OOMScoreAdjust=-900
-UNIT
+ManagedOOMPreference=omit"
+if [ ! -f "$SSHD_OVERRIDE" ] || ! diff -q <(echo "$SSHD_OVERRIDE_DESIRED") "$SSHD_OVERRIDE" &>/dev/null; then
+  echo "Protecting sshd from OOM killers..."
+  sudo mkdir -p /etc/systemd/system/ssh.service.d
+  echo "$SSHD_OVERRIDE_DESIRED" | sudo tee "$SSHD_OVERRIDE" > /dev/null
   sudo systemctl daemon-reload
 fi
 

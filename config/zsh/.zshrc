@@ -80,7 +80,7 @@ wt() {
 #     but swap), which inflated claude's pressure signature and made it the
 #     pressure-kill victim — every observed kill was pressure-based. The swap-hog
 #     protection the cap was meant to provide (not being oomd's swap-kill target)
-#     now comes directly from ManagedOOMPreference=avoid below, which covers both
+#     now comes directly from ManagedOOMPreference=omit below, which covers both
 #     swap and pressure kills. Set e.g. 4G only if several concurrent sessions
 #     start filling the small system swap and provoking collateral swap-kills.
 #   CLAUDE_SCOPE_MEMORY_HIGH (default 32G) — MemoryHigh per scope. Soft
@@ -89,13 +89,19 @@ wt() {
 #   CLAUDE_SCOPE_MEMORY_MAX (unset) — MemoryMax per scope. Left unset so an
 #     active session is never hard-killed; set it (e.g. 40G) only to add a
 #     kernel backstop against a pathological runaway.
-#   CLAUDE_OOMD_PREFERENCE (default avoid) — ManagedOOMPreference on the scope.
-#     systemd-oomd ignores earlyoom's name lists and a *pressure* kill targets
-#     the heaviest-reclaim cgroup, which is usually this interactive session
-#     rather than a larger idle dev server. "avoid" demotes claude below
-#     un-marked sibling scopes so a dev server / build is killed first; "omit"
-#     makes claude entirely ineligible (it thrashes instead — relies on the
-#     MemoryMax/earlyoom/kernel backstop); "none" opts out.
+#   CLAUDE_OOMD_PREFERENCE (default omit) — ManagedOOMPreference on the scope.
+#     systemd-oomd ignores earlyoom's name lists, OOMScoreAdjust, and the kernel
+#     score; ManagedOOMPreference is the *only* lever it honours. "avoid" merely
+#     demotes claude below un-marked siblings — but at true memory+swap
+#     exhaustion (every observed kill fired at ~95% RAM and ~100% swap together)
+#     oomd reaps repeatedly, and once the un-marked hogs are gone an actively
+#     allocating claude becomes the heaviest *eligible* victim and dies anyway.
+#     "omit" makes claude categorically ineligible, so oomd reaps a dev server,
+#     clickhouse, or an un-named background session instead; the kernel OOM
+#     killer (which omit does NOT bind) plus earlyoom's --avoid list remain the
+#     last-resort backstop. "avoid" and "none" stay available for the rare case
+#     where many concurrent claude sessions are themselves the only swap holders
+#     and you need oomd to be able to thin them. "none" opts out entirely.
 #
 # A function is used rather than a PATH-prepended wrapper script because
 # `mise activate zsh` (sourced below) restores PATH from a captured
@@ -119,13 +125,40 @@ claude() {
     --name=claude
     "--high=${CLAUDE_SCOPE_MEMORY_HIGH:-32G}"
   )
-  case "${CLAUDE_OOMD_PREFERENCE:-avoid}" in
+  case "${CLAUDE_OOMD_PREFERENCE:-omit}" in
     avoid) caps+=(--oom-avoid) ;;
     omit)  caps+=(--oom-omit) ;;
   esac
   [[ -n "${CLAUDE_SCOPE_SWAP_MAX:-}" ]] && caps+=("--swap-max=${CLAUDE_SCOPE_SWAP_MAX}")
   [[ -n "${CLAUDE_SCOPE_MEMORY_MAX:-}" ]] && caps+=("--max=${CLAUDE_SCOPE_MEMORY_MAX}")
   scope "${caps[@]}" -- "$bin" "$@"
+}
+
+# Launch a worktree dev server inside a memory-capped systemd user scope so a
+# runaway next-server / build self-OOMs at its own cgroup cap instead of driving
+# the whole box into swap exhaustion — the condition that historically pushed
+# systemd-oomd into killing claude sessions. A next-server heap can balloon to
+# tens of GB during a hot-reload storm; --high throttles it via kernel reclaim
+# and --max is the hard per-scope kernel-OOM backstop, so only that one dev
+# server dies and global memory pressure never builds. (Dev servers claude
+# itself launches via its Bash tool already live inside claude's own capped
+# scope; this covers the dev servers you start by hand in a login shell, which
+# are otherwise uncapped and can outlive a disconnected session.)
+#
+# Usage: `dev` (≈ pnpm dev), `dev dev-only`, `dev dev:inngest` — args pass
+# straight through to pnpm. Caps tunable via the environment:
+#   DEV_SCOPE_MEMORY_HIGH (default 8G), DEV_SCOPE_MEMORY_MAX (default 12G).
+# Pass-through on non-Linux or where the scope helper is unavailable.
+dev() {
+  local -a sub=("${@:-dev}")
+  if [[ "$(uname -s)" != Linux ]] || ! command -v scope >/dev/null 2>&1; then
+    pnpm "${sub[@]}"
+    return
+  fi
+  scope --name="dev-${PWD:t}" \
+    "--high=${DEV_SCOPE_MEMORY_HIGH:-8G}" \
+    "--max=${DEV_SCOPE_MEMORY_MAX:-12G}" \
+    -- pnpm "${sub[@]}"
 }
 
 # --- Platform-specific ---
