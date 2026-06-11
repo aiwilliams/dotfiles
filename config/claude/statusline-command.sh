@@ -3,7 +3,10 @@
 # Mirrors ~/.p10k.zsh: os_icon | dir | vcs | zmx segments with powerline separators
 
 input=$(cat)
-cwd=$(echo "$input" | jq -r '.cwd')
+# Pull everything we need in one jq pass (tab-separated; IFS=tab so paths with spaces survive)
+IFS=$'\t' read -r cwd ctx_pct cost_usd < <(
+  echo "$input" | jq -r '[.cwd, (.context_window.used_percentage // ""), (.cost.total_cost_usd // "")] | @tsv'
+)
 
 # 256-color helpers
 fg() { printf '\033[38;5;%dm' "$1"; }
@@ -45,6 +48,24 @@ fi
 zmx_info=""
 if [[ -n "$ZMX_SESSION" ]]; then
   zmx_info="[${ZMX_SESSION}]"
+fi
+
+# --- Context-used segment (Claude Code session, color-coded by severity) ---
+ctx_info=""
+ctx_color=$META
+if [[ -n "$ctx_pct" ]]; then
+  pct_int=$(printf '%.0f' "$ctx_pct")
+  if   (( pct_int >= 80 )); then ctx_color=196   # red
+  elif (( pct_int >= 50 )); then ctx_color=178   # amber
+  else                           ctx_color=$VCS_CLEAN
+  fi
+  ctx_info="${pct_int}%"
+fi
+
+# --- Session cost segment (whole US dollars) ---
+cost_info=""
+if [[ -n "$cost_usd" ]]; then
+  cost_info="\$$(printf '%.0f' "$cost_usd")"
 fi
 
 # --- Git segment (lock-free: reads HEAD directly from filesystem) ---
@@ -95,6 +116,16 @@ fi
 # ZMX session segment (if inside a zmx session)
 if [[ -n "$zmx_info" ]]; then
   output+=" $(fg $META)${SUBSEP} $(reset)$(fg $META)${zmx_info}"
+fi
+
+# Context-used segment (if Claude Code supplied it)
+if [[ -n "$ctx_info" ]]; then
+  output+=" $(fg $META)${SUBSEP} $(fg $ctx_color)${ctx_info}"
+fi
+
+# Session cost segment (if Claude Code supplied it)
+if [[ -n "$cost_info" ]]; then
+  output+=" $(fg $META)${SUBSEP} $(fg $META)${cost_info}"
 fi
 
 # End cap
