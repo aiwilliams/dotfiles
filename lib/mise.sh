@@ -4,7 +4,11 @@
 set -euo pipefail
 
 if command -v mise &>/dev/null; then
-  echo "mise already installed, skipping."
+  echo "mise already installed; updating to latest..."
+  # Keep mise current so its bundled aqua registry knows up-to-date asset
+  # names (e.g. pnpm's renamed pnpm-darwin-arm64.tar.gz). Both machines
+  # install mise via mise.run below, so self-update is the right mechanism.
+  mise self-update -y
 else
   echo "Installing mise..."
   curl -fsSL https://mise.run | sh
