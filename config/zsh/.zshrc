@@ -141,12 +141,20 @@ esac
 
 # --- Terminal fixups ---
 
-# TUI programs (Claude Code, neovim) may push the kitty keyboard protocol
-# and/or enable xterm modifyOtherKeys without properly restoring on exit,
-# leaving Ctrl-C, Ctrl-R, etc. emitting raw CSI u sequences. Pop up to 99
-# kitty protocol stack entries and reset modifyOtherKeys before each prompt.
-_reset_keyboard_protocol() { printf '\e[<99u\e[>4;0m' >/dev/tty; }
-precmd_functions+=(_reset_keyboard_protocol)
+# TUI programs (Claude Code, neovim) may push the kitty keyboard protocol,
+# enable xterm modifyOtherKeys, or turn on mouse tracking without properly
+# restoring on exit — guaranteed when an SSH connection drops mid-session,
+# since the remote app never gets to send its restore sequences. That leaves
+# Ctrl-C, Ctrl-R, etc. emitting raw CSI u sequences, and mouse motion spraying
+# SGR reports ("35;12;8M" garbage) into the prompt. Before each prompt: pop up
+# to 99 kitty protocol stack entries, reset modifyOtherKeys, disable every
+# mouse tracking/encoding mode (1000-1003 trackers, 1004 focus reporting,
+# 1005/1006/1015/1016 encodings), and re-show the cursor in case the app died
+# with it hidden.
+_reset_terminal_modes() {
+  printf '\e[<99u\e[>4;0m\e[?1000;1001;1002;1003;1004;1005;1006;1015;1016l\e[?25h' >/dev/tty
+}
+precmd_functions+=(_reset_terminal_modes)
 
 # --- Tools ---
 
