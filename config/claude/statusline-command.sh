@@ -4,8 +4,8 @@
 
 input=$(cat)
 # Pull everything we need in one jq pass (tab-separated; IFS=tab so paths with spaces survive)
-IFS=$'\t' read -r cwd ctx_pct cost_usd < <(
-  echo "$input" | jq -r '[.cwd, (.context_window.used_percentage // ""), (.cost.total_cost_usd // "")] | @tsv'
+IFS=$'\t' read -r cwd ctx_pct cost_usd model_name effort < <(
+  echo "$input" | jq -r '[.cwd, (.context_window.used_percentage // ""), (.cost.total_cost_usd // ""), (.model.display_name // ""), (.effort.level // "")] | @tsv'
 )
 
 # 256-color helpers
@@ -21,21 +21,24 @@ DIR_FG=31     # directory foreground
 DIR_ANCHOR=39 # directory anchor (last component) foreground
 VCS_CLEAN=76  # git clean
 META=244      # grey meta text
+MODEL_FG=141  # model name (soft purple)
 
 # Powerline glyphs (use raw UTF-8 bytes — \u escapes fail in POSIX locale)
 SEP=$'\xEE\x82\xB0'
-SEP_START=$'\xEE\x82\xB6'
 SUBSEP=$'\xEE\x82\xB1'
 BRANCH=$'\xEF\x84\xA6'
+APPLE=$'\xEF\x85\xB9'   # nf-fa-apple  (U+F179)
+LINUX=$'\xEF\x85\xBC'   # nf-fa-linux  (U+F17C)
 
-# --- OS icon segment ---
-os_icon=""
+# --- OS icon segment (Apple on macOS, Tux on Linux) ---
+case "$(uname -s)" in
+  Darwin) os_icon="$APPLE" ;;
+  Linux)  os_icon="$LINUX" ;;
+  *)      os_icon="?" ;;
+esac
 
-# --- Directory segment (shorten like p10k) ---
-# Replace $HOME with ~
+# --- Directory segment (shorten like p10k: ~ for $HOME, last component bold) ---
 dir="${cwd/#$HOME/\~}"
-
-# Split into components - show last component bold in anchor color
 if [[ "$dir" == */* ]]; then
   parent="${dir%/*}/"
   anchor="${dir##*/}"
@@ -44,13 +47,24 @@ else
   anchor="$dir"
 fi
 
-# --- ZMX session segment (reads $ZMX_SESSION from inherited environment) ---
+# --- ZMX session segment ---
 zmx_info=""
 if [[ -n "$ZMX_SESSION" ]]; then
   zmx_info="[${ZMX_SESSION}]"
 fi
 
-# --- Context-used segment (Claude Code session, color-coded by severity) ---
+# --- Model + effort segment ---
+model_info=""
+if [[ -n "$model_name" ]]; then
+  # Strip trailing parenthetical (e.g. "Opus 4.8 (1M context)" -> "Opus 4.8")
+  model_name="${model_name% (*}"
+  model_info="${model_name}"
+  if [[ -n "$effort" ]]; then
+    model_info="${model_info} ${effort}"
+  fi
+fi
+
+# --- Context-used segment (color-coded by severity) ---
 ctx_info=""
 ctx_color=$META
 if [[ -n "$ctx_pct" ]]; then
@@ -89,46 +103,37 @@ if [[ -n "$git_dir" ]]; then
   git_info="$(fg $VCS_CLEAN)${BRANCH} ${branch}"
 fi
 
-# --- Render segments ---
-output=""
-
-# Start cap
-output+="$(fg $BG)${SEP_START}"
-
-# OS icon segment
-output+="$(bg $BG)$(fg $OS_FG) ${os_icon} "
-
-# Separator (same bg, just a thin divider)
+# --- Render segments (OS icon has no start cap — invisible on a dark terminal bg) ---
+output="$(bg $BG)$(fg $OS_FG)${os_icon} "
 output+="$(fg $META)${SUBSEP} "
 
-# Dir segment
 if [[ -n "$parent" ]]; then
   output+="$(fg $DIR_FG)${parent}$(bold)$(fg $DIR_ANCHOR)${anchor}"
 else
   output+="$(bold)$(fg $DIR_ANCHOR)${anchor}"
 fi
 
-# Git segment (if available)
 if [[ -n "$git_info" ]]; then
   output+=" $(fg $META)${SUBSEP} ${git_info}"
 fi
 
-# ZMX session segment (if inside a zmx session)
 if [[ -n "$zmx_info" ]]; then
   output+=" $(fg $META)${SUBSEP} $(reset)$(fg $META)${zmx_info}"
 fi
 
-# Context-used segment (if Claude Code supplied it)
+if [[ -n "$model_info" ]]; then
+  output+=" $(fg $META)${SUBSEP} $(fg $MODEL_FG)${model_info}"
+fi
+
 if [[ -n "$ctx_info" ]]; then
   output+=" $(fg $META)${SUBSEP} $(fg $ctx_color)${ctx_info}"
 fi
 
-# Session cost segment (if Claude Code supplied it)
 if [[ -n "$cost_info" ]]; then
   output+=" $(fg $META)${SUBSEP} $(fg $META)${cost_info}"
 fi
 
-# End cap
+# Closing powerline cap
 output+=" $(reset)$(fg $BG)${SEP}$(reset)"
 
 printf '%s' "$output"
