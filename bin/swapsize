@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# swapsize — inspect and resize the swapfile, safely.
+#
+# Resizing means turning swap off, which forces every page currently in swap
+# back into RAM. If RAM can't absorb it, swapoff drives the box straight into
+# the OOM killer it's meant to relieve. So this script refuses to start unless
+# there's enough free RAM to hold the in-use swap with margin to spare, and it
+# stages the new file (create + mkswap) *before* touching the live swap, so a
+# failure leaves the running swap untouched.
+#
+# Usage:
+#   swapsize                 Show current swap, RAM, and headroom (read-only)
+#   swapsize status          Same as above
+#   swapsize 32G             Resize the swapfile to 32G (prompts first)
+#   swapsize -y 32G          Resize without the confirmation prompt
+#   swapsize 16G             Revert to 16G the same way
+#
+# Sizes accept K/M/G/T (powers of 1024): 32G, 16G, 8192M, or a raw byte count.
+# The /etc/fstab entry is size-agnostic (it just names the file), so a resize
+# persists across reboot with no fstab edit; reverting is just `swapsize 16G`.
+
+set -euo pipefail
+
+bold='\033[1m'; red='\033[31m'; green='\033[32m'; yellow='\033[33m'; reset='\033[0m'
+
+die()  { printf "${red}swapsize: %s${reset}\n" "$*" >&2; exit 1; }
+note() { printf "${yellow}%s${reset}\n" "$*"; }
+
+[ "$(uname -s)" = Linux ] || die "Linux only (swap management is Linux-specific)."
+
+# --- helpers ---------------------------------------------------------------
+
+# Human size -> bytes. Accepts 32G / 16GiB / 8192M / 500K / raw bytes.
+parse_size() {
+  local in=$1 n u
+  if [[ $in =~ ^([0-9]+)([KkMmGgTt]?)[iI]?[bB]?$ ]]; then
+    n=${BASH_REMATCH[1]}; u=${BASH_REMATCH[2]^^}
+    case "$u" in
+      K) echo $(( n * 1024 )) ;;
+      M) echo $(( n * 1024 * 1024 )) ;;
+      G) echo $(( n * 1024 * 1024 * 1024 )) ;;
+      T) echo $(( n * 1024 * 1024 * 1024 * 1024 )) ;;
+      "") echo $(( n )) ;;
+    esac
+  else
+    return 1
+  fi
+}
+
+# Bytes -> "N.NG" for display.
+gb() { awk "BEGIN{printf \"%.1fG\", ${1:-0}/1073741824}"; }
+
+# Field (KB) from /proc/meminfo.
+meminfo_kb() { awk -v k="$1:" '$1==k{print $2; exit}' /proc/meminfo; }
+
+# First file-backed swap area: "path size_bytes used_bytes". Empty if none.
+swap_area() {
+  awk 'NR>1 && $2=="file"{print $1, $3*1024, $4*1024; exit}' /proc/swaps
+}
+
+# --- status ----------------------------------------------------------------
+
+# Echoes globals: SWAPFILE SWAP_SIZE SWAP_USED MEM_AVAIL MEM_TOTAL
+read_state() {
+  local area; area=$(swap_area || true)
+  SWAPFILE=""; SWAP_SIZE=0; SWAP_USED=0
+  if [ -n "$area" ]; then
+    read -r SWAPFILE SWAP_SIZE SWAP_USED <<<"$area"
+  fi
+  MEM_AVAIL=$(( $(meminfo_kb MemAvailable) * 1024 ))
+  MEM_TOTAL=$(( $(meminfo_kb MemTotal) * 1024 ))
+}
+
+# Required free RAM to safely swapoff the file: its in-use pages + a margin.
+MARGIN=$(( 2 * 1024 * 1024 * 1024 ))   # 2 GiB cushion above the moved pages
+
+show_status() {
+  read_state
+  printf "${bold}── Swap${reset}\n"
+  if [ -z "$SWAPFILE" ]; then
+    note "  no file-backed swap active (check 'swapon --show')"
+  else
+    printf "  file:  %s\n" "$SWAPFILE"
+    printf "  size:  %s   used: %s\n" "$(gb "$SWAP_SIZE")" "$(gb "$SWAP_USED")"
+  fi
+  printf "${bold}── RAM${reset}\n"
+  printf "  total: %s   available: %s\n" "$(gb "$MEM_TOTAL")" "$(gb "$MEM_AVAIL")"
+  printf "${bold}── Headroom to disable swap${reset}\n"
+  printf "  need:  in-use swap %s + %s margin = %s\n" \
+    "$(gb "$SWAP_USED")" "$(gb "$MARGIN")" "$(gb $(( SWAP_USED + MARGIN )))"
+  if [ "$MEM_AVAIL" -ge "$(( SWAP_USED + MARGIN ))" ]; then
+    printf "  have:  ${green}%s available — OK to resize${reset}\n" "$(gb "$MEM_AVAIL")"
+  else
+    printf "  have:  ${red}%s available — NOT enough; free RAM first${reset}\n" "$(gb "$MEM_AVAIL")"
+  fi
+}
+
+# --- resize ----------------------------------------------------------------
+
+ASSUME_YES=false
+
+confirm() {
+  $ASSUME_YES && return 0
+  printf "${bold}Proceed? [y/N]${reset} "
+  local ans=""; read -r ans </dev/tty 2>/dev/null || true
+  [[ "$ans" == [yY]* ]]
+}
+
+resize() {
+  local target_bytes=$1
+
+  read_state
+  [ -n "$SWAPFILE" ] || die "no file-backed swap to resize. Create one first, or check /proc/swaps."
+
+  # 1) Headroom gate — the whole point of the script.
+  if [ "$MEM_AVAIL" -lt "$(( SWAP_USED + MARGIN ))" ]; then
+    show_status
+    die "insufficient free RAM to disable swap safely. Close memory hogs and retry."
+  fi
+
+  # 2) Disk gate — stage the new file alongside the old one.
+  local dir; dir=$(dirname "$SWAPFILE")
+  local avail; avail=$(df -B1 --output=avail "$dir" | tail -1 | tr -dc '0-9')
+  if [ "${avail:-0}" -lt "$(( target_bytes + 512*1024*1024 ))" ]; then
+    die "not enough free disk in $dir ($(gb "$avail") avail) for a $(gb "$target_bytes") file."
+  fi
+
+  local fstype; fstype=$(findmnt -no FSTYPE -T "$SWAPFILE" 2>/dev/null || echo "?")
+
+  printf "${bold}Plan${reset}\n"
+  printf "  resize %s: %s ${bold}→ %s${reset}  (fs: %s)\n" \
+    "$SWAPFILE" "$(gb "$SWAP_SIZE")" "$(gb "$target_bytes")" "$fstype"
+  printf "  steps: stage %s.new → mkswap → swapoff old → swap in new → verify\n" "$SWAPFILE"
+  printf "  RAM check: ${green}%s available ≥ %s needed${reset}\n" \
+    "$(gb "$MEM_AVAIL")" "$(gb $(( SWAP_USED + MARGIN )))"
+  confirm || { note "aborted, nothing changed."; exit 0; }
+
+  local new="$SWAPFILE.new"
+  rm -f "$new"
+
+  # 3) Build the new file fully before touching live swap. fallocate is fine on
+  # ext4/xfs; on anything else (e.g. btrfs CoW), fall back to dd to guarantee a
+  # hole-free file that swapon will accept.
+  printf "Creating %s (%s)...\n" "$new" "$(gb "$target_bytes")"
+  if [ "$fstype" = ext4 ] || [ "$fstype" = xfs ]; then
+    fallocate -l "$target_bytes" "$new"
+  else
+    note "fs '$fstype' — using dd (slower) to avoid a sparse/holey swapfile"
+    dd if=/dev/zero of="$new" bs=1M count=$(( target_bytes / 1048576 )) status=progress
+  fi
+  chmod 600 "$new"
+  mkswap "$new" >/dev/null
+
+  # 4) Swap-over. From here the live swap is briefly gone; keep it tight.
+  printf "Disabling old swap (paging %s back into RAM)...\n" "$(gb "$SWAP_USED")"
+  swapoff "$SWAPFILE"
+  rm -f "$SWAPFILE"
+  mv "$new" "$SWAPFILE"
+  swapon "$SWAPFILE"
+
+  # 5) Persist: ensure exactly one fstab entry (size-agnostic) for the file.
+  if ! grep -qsE "^[^#]*[[:space:]]${SWAPFILE//\//\\/}[[:space:]]+.*swap" /etc/fstab \
+     && ! grep -qsE "^${SWAPFILE//\//\\/}[[:space:]]" /etc/fstab; then
+    printf '%s\tnone\tswap\tsw\t0\t0\n' "$SWAPFILE" >> /etc/fstab
+    note "added fstab entry for $SWAPFILE"
+  fi
+
+  printf "${green}Done.${reset}\n"
+  swapon --show
+  free -h | awk 'NR<=3'
+}
+
+# --- main ------------------------------------------------------------------
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -y|--yes)    ASSUME_YES=true; shift ;;
+    -h|--help)   sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    status)      show_status; exit 0 ;;
+    -*)          die "unknown flag: $1" ;;
+    *)           TARGET_ARG=$1; shift ;;
+  esac
+done
+
+if [ -z "${TARGET_ARG:-}" ]; then
+  show_status
+  exit 0
+fi
+
+target=$(parse_size "$TARGET_ARG") || die "invalid size: $TARGET_ARG (try 32G, 16G, 8192M)"
+[ "$target" -ge $(( 512 * 1024 * 1024 )) ] || die "refusing a swap size below 512M ($TARGET_ARG)."
+
+# Destructive path needs root; re-exec under sudo, preserving flags.
+if [ "$(id -u)" -ne 0 ]; then
+  if $ASSUME_YES; then exec sudo "$0" -y "$TARGET_ARG"; else exec sudo "$0" "$TARGET_ARG"; fi
+fi
+
+resize "$target"
