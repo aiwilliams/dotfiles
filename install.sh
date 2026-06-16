@@ -34,6 +34,9 @@ source "$SCRIPT_DIR/lib/mise.sh"
 # Dev tools (claude, codex, graphite)
 source "$SCRIPT_DIR/lib/dev-tools.sh"
 
+# skim (Zig TUI for code reviews; pairs with Graphite stacks)
+source "$SCRIPT_DIR/lib/skim.sh"
+
 # Neovim (LazyVim)
 source "$SCRIPT_DIR/lib/neovim.sh"
 
