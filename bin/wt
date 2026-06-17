@@ -7,7 +7,7 @@
 # Usage:
 #   wt create <branch>                  Create worktree with auto-numbered ID on a branch
 #   wt create --detach                  Create worktree in detached HEAD state
-#   wt checkout [branch]                 Fetch a remote branch and create a worktree (fzf picker if no arg)
+#   wt checkout [branch]                 Create a worktree for a branch (local/remote/new; fzf picker if no arg)
 #   wt remove [N|wtN]                   Remove worktree + drop DBs (fzf picker if no arg)
 #   wt remove --merged                  Remove all worktrees with merged PRs
 #   wt list                             List all worktrees with status
@@ -368,7 +368,7 @@ Usage: wt <command> [args]
 
 Commands:
   create <branch>                Create worktree on a branch (or --detach for detached HEAD)
-  checkout [branch]              Fetch a remote branch and create a worktree (fzf picker if no arg)
+  checkout [branch]              Create a worktree for a branch: local/remote/new (fzf picker if no arg)
   remove [N|wtN]                 Remove worktree and drop DBs (interactive picker if no arg)
   remove --merged                Remove all worktrees with merged PRs
   list                           List all worktrees with ID, branch, port, and status
@@ -420,26 +420,38 @@ COMMANDS
   wt create <branch>
   wt create --detach
 
-    Create a new worktree with the next available wtN identifier. A branch
-    name is required — the worktree checks out or creates that branch, copies
-    .env from main, clones databases, and runs WT_POST_CREATE if set in .wtrc.
-    Use --detach for a detached HEAD worktree.
+    Create a new worktree with the next available wtN identifier, then copy
+    .env from main, clone databases, and run WT_POST_CREATE if set in .wtrc.
+
+    The branch is acquired with a non-destructive, state-aware strategy:
+
+      already checked out elsewhere  refuses (a branch lives in one worktree)
+      existing local branch          adopted as-is; never fetch --force or
+                                     rebase. Divergence from origin is reported,
+                                     not "fixed".
+      remote-only branch             fetched via `gt get` (no --force, brings
+                                     the stack) or git fetch, then checked out.
+      brand-new name                 created from the current HEAD.
+
+    Graphite tracking is applied only when the branch isn't already tracked,
+    and never forces a parent or rebases — so a stacked branch keeps its place
+    instead of being flattened onto its PR base. Use --detach for a detached
+    HEAD worktree.
 
     Examples:
-      wt create my-feature   # worktree on branch my-feature
+      wt create my-feature   # new branch off HEAD, or adopt if it exists
       wt create --detach     # detached worktree at next wtN
 
   wt checkout [branch]
 
-    Fetch a remote branch and create a worktree for it. With no argument,
-    opens an interactive picker (requires gh + fzf) listing your remote
-    branches with PRs that aren't already checked out as worktrees.
-    Fetches via Graphite (gt get) if available, otherwise via GitHub CLI
-    (gh pr checkout).
+    Create a worktree for a branch — identical acquisition logic to `wt create`
+    (local / remote / new are all handled). With no argument, opens an
+    interactive picker (requires gh + fzf) listing your remote branches with
+    PRs that aren't already checked out as worktrees.
 
     Examples:
       wt checkout                       # interactive picker
-      wt checkout use-opine-localhost   # fetch and create worktree directly
+      wt checkout feat/pnpm-dispatcher  # adopt existing local branch, or fetch
 
   wt remove [N|wtN]
 
@@ -746,54 +758,94 @@ DATABASE BACKUP & RESTORE
 EOF
 }
 
-# Fetch a remote branch into the main worktree, trying Graphite first, then GitHub
-# CLI, then plain git fetch. Leaves main on its original branch afterward. Sets
-# FETCH_BRANCH to the local branch name that was checked out (gh pr checkout may rename).
-# $1 = branch name
-fetch_remote_branch() {
+# Inspect a branch and set BS_* globals describing its state, so worktree
+# creation can pick a non-destructive acquisition strategy. Uses only fast,
+# local git refs (no network, no graphite) — call fetch_branch_for_worktree
+# first if you need the remote-tracking ref populated.
+#
+#   BS_LOCAL           true if refs/heads/<branch> exists
+#   BS_REMOTE          true if refs/remotes/origin/<branch> exists locally
+#   BS_CHECKED_OUT_AT  path of the worktree that has <branch> checked out, or ""
+#   BS_AHEAD/BS_BEHIND commits local is ahead/behind origin (only when both exist)
+detect_branch_state() {
   local branch="$1"
   local main_dir
   main_dir=$(main_worktree_dir)
-  local original_branch
-  original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
-  local err_file
-  err_file=$(mktemp)
-  # Expand $err_file now so the trap cleans up the right file
-  # shellcheck disable=SC2064
-  trap "rm -f '$err_file'" RETURN
 
-  FETCH_BRANCH="$branch"
+  BS_LOCAL=false
+  BS_REMOTE=false
+  BS_CHECKED_OUT_AT=""
+  BS_AHEAD=0
+  BS_BEHIND=0
 
-  # Try Graphite first — gt get fetches the branch and its entire stack.
-  # Use --no-checkout so gt doesn't try to switch branches in the main worktree
-  # (which fails if there are uncommitted changes).
+  if git -C "$main_dir" show-ref --verify --quiet "refs/heads/$branch"; then
+    BS_LOCAL=true
+  fi
+  if git -C "$main_dir" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    BS_REMOTE=true
+  fi
+
+  # Which worktree, if any, already has this branch checked out? A branch can
+  # only live in one worktree at a time, so this is a hard blocker for reuse.
+  local line cur=""
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) cur="${line#worktree }" ;;
+      "branch refs/heads/$branch") BS_CHECKED_OUT_AT="$cur"; break ;;
+    esac
+  done < <(git -C "$main_dir" worktree list --porcelain)
+
+  if [[ "$BS_LOCAL" == true && "$BS_REMOTE" == true ]]; then
+    local counts
+    counts=$(git -C "$main_dir" rev-list --left-right --count \
+      "refs/heads/$branch...refs/remotes/origin/$branch" 2>/dev/null) || counts=""
+    if [[ -n "$counts" ]]; then
+      BS_AHEAD=${counts%%[[:space:]]*}
+      BS_BEHIND=${counts##*[[:space:]]}
+    fi
+  fi
+}
+
+# Bring a remote-only branch into the local repo without mutating any existing
+# local branch. Returns 0 if origin has the branch and it was fetched, 1 if the
+# branch does not exist on the remote (caller should create it new).
+#
+# Prefers `gt get` (no --force) so the branch's stack + graphite tracking come
+# along; falls back to plain git fetch, then gh pr checkout for fork PRs. Never
+# uses --force: `gt get --force` would reset every branch in the stack to match
+# remote, clobbering local work across other worktrees.
+# $1 = branch name
+fetch_branch_for_worktree() {
+  local branch="$1"
+  local main_dir
+  main_dir=$(main_worktree_dir)
+
+  # Fast bail when origin has no such branch — keeps `wt create <new>` snappy.
+  if ! git -C "$main_dir" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    return 1
+  fi
+
   if command -v gt &>/dev/null; then
-    echo -e "${BOLD}Fetching branch via Graphite...${NC}"
-    if (cd "$main_dir" && gt get "$branch" --force --no-checkout 2>"$err_file"); then
+    echo -e "${BOLD}Fetching via Graphite (gt get, no --force)...${NC}"
+    # stdin closed so an ambiguous prompt fails fast instead of hanging.
+    if (cd "$main_dir" && gt get "$branch" --no-checkout </dev/null 2>/dev/null); then
       return 0
     fi
-    echo -e "${YELLOW}Graphite failed: $(cat "$err_file")${NC}"
+    echo -e "${YELLOW}Graphite fetch failed; falling back to git fetch.${NC}"
   fi
 
-  # Fall back to gh pr checkout
-  if command -v gh &>/dev/null; then
-    echo -e "${BOLD}Fetching branch via GitHub CLI...${NC}"
-    if (cd "$main_dir" && gh pr checkout "$branch" --force 2>"$err_file"); then
-      FETCH_BRANCH=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
-      (cd "$main_dir" && git checkout "$original_branch" > /dev/null 2>&1)
-      return 0
-    fi
-    echo -e "${YELLOW}GitHub CLI failed: $(cat "$err_file")${NC}"
-  fi
-
-  # Last resort: plain git fetch
-  echo -e "${BOLD}Fetching branch via git...${NC}"
   if git -C "$main_dir" fetch origin "$branch" 2>/dev/null; then
-    if git -C "$main_dir" branch --list "$branch" | grep -q .; then
-      # Local branch exists — update it to match remote
-      git -C "$main_dir" branch -f "$branch" "origin/$branch" 2>/dev/null
-    fi
     return 0
+  fi
+
+  if command -v gh &>/dev/null; then
+    echo -e "${BOLD}Fetching via GitHub CLI...${NC}"
+    local original_branch
+    original_branch=$(git -C "$main_dir" rev-parse --abbrev-ref HEAD)
+    if (cd "$main_dir" && gh pr checkout "$branch" </dev/null 2>/dev/null); then
+      (cd "$main_dir" && git checkout "$original_branch" >/dev/null 2>&1) || true
+      return 0
+    fi
   fi
 
   return 1
@@ -853,15 +905,44 @@ cmd_create() {
   fi
   echo ""
 
-  # Create git worktree
+  # Create git worktree. Pick a non-destructive strategy based on the branch's
+  # actual state rather than blindly fetch-forcing and re-tracking.
   echo -e "${GREEN}Git worktree:${NC} $wt_dir"
   if [[ "$detach" == true ]]; then
     git worktree add "$wt_dir" --detach
   else
-    git fetch origin "$branch" 2>/dev/null || true
-    git worktree add "$wt_dir" "$branch" 2>/dev/null \
-      || git worktree add "$wt_dir" "origin/$branch" 2>/dev/null \
-      || git worktree add "$wt_dir" -b "$branch"
+    detect_branch_state "$branch"
+
+    # A branch can only be checked out in one worktree — refuse rather than let
+    # git fail cryptically halfway through setup.
+    if [[ -n "$BS_CHECKED_OUT_AT" ]]; then
+      echo -e "${RED}Branch '${branch}' is already checked out at:${NC}"
+      echo -e "  ${BS_CHECKED_OUT_AT}"
+      echo -e "${YELLOW}Switch to that worktree (wt switch) or remove it first.${NC}"
+      exit 1
+    fi
+
+    if [[ "$BS_LOCAL" == true ]]; then
+      # Adopt the existing local branch as-is. Never fetch --force or rebase —
+      # that would clobber local work or flatten a stacked branch.
+      echo -e "${DIM}Using existing local branch${NC}"
+      if [[ "$BS_REMOTE" == true ]] && (( BS_AHEAD || BS_BEHIND )); then
+        echo -e "${YELLOW}Note: local '${branch}' diverges from origin (${BS_AHEAD} ahead, ${BS_BEHIND} behind). Building from the local branch as-is.${NC}"
+      fi
+      git worktree add "$wt_dir" "$branch"
+    elif fetch_branch_for_worktree "$branch"; then
+      # Remote had the branch (gt get may have created it locally with its stack).
+      detect_branch_state "$branch"
+      if [[ "$BS_LOCAL" == true ]]; then
+        git worktree add "$wt_dir" "$branch"
+      else
+        git worktree add --track -b "$branch" "$wt_dir" "origin/$branch"
+      fi
+    else
+      # Brand-new branch: create it from the current HEAD.
+      echo -e "${DIM}Creating new branch '${branch}'${NC}"
+      git worktree add "$wt_dir" -b "$branch"
+    fi
   fi
 
   # Run plugin create hooks (clone databases, etc.)
@@ -891,23 +972,18 @@ cmd_create() {
     (cd "$wt_dir" && eval "$WT_POST_CREATE")
   fi
 
-  # Track branch in Graphite
+  # Track branch in Graphite — only if it isn't tracked already, and never by
+  # forcing a parent or rebasing (that would flatten a stacked branch onto its
+  # PR base). `gt branch track` is a no-op on already-tracked branches and
+  # infers the parent from commit ancestry otherwise. Best-effort: stdin closed
+  # so an ambiguous parent prompt fails fast instead of hanging the script.
   if [[ -n "$branch" ]] && command -v gt &>/dev/null; then
     echo ""
-    echo -e "${BOLD}Tracking branch in Graphite...${NC}"
-    local pr_base=""
-    if command -v gh &>/dev/null; then
-      pr_base=$(gh pr view "$branch" --json baseRefName --jq '.baseRefName' 2>/dev/null) || true
-    fi
-    if [[ -n "${pr_base:-}" ]]; then
-      echo -e "  PR targets: ${pr_base}"
-      (cd "$wt_dir" && git rebase "origin/${pr_base}" 2>/dev/null; gt branch track --force --parent "$pr_base" 2>/dev/null) \
-        && echo -e "${GREEN}Tracked in Graphite (parent: ${pr_base})${NC}" \
-        || echo -e "${YELLOW}Graphite tracking skipped${NC}"
+    echo -e "${BOLD}Graphite...${NC}"
+    if (cd "$wt_dir" && gt branch track </dev/null >/dev/null 2>&1); then
+      echo -e "${GREEN}Branch tracked in Graphite${NC}"
     else
-      (cd "$wt_dir" && gt branch track --force 2>/dev/null) \
-        && echo -e "${GREEN}Tracked in Graphite${NC}" \
-        || echo -e "${YELLOW}Graphite tracking skipped (no PR found, used nearest ancestor)${NC}"
+      echo -e "${YELLOW}Graphite tracking left unchanged${NC} ${DIM}(already tracked, or run 'gt branch track' in the worktree to set a parent)${NC}"
     fi
   fi
 
@@ -921,12 +997,13 @@ cmd_create() {
 cmd_checkout() {
   local branch="${1:-}"
 
-  if ! command -v gh &>/dev/null; then
-    echo -e "${RED}gh CLI is required. Install it first.${NC}"
-    exit 1
-  fi
-
   if [[ -z "$branch" ]]; then
+    # The interactive picker lists your open PRs, so it needs gh + fzf. The
+    # direct-arg form does not — cmd_create resolves local/remote/new itself.
+    if ! command -v gh &>/dev/null; then
+      echo -e "${RED}gh CLI is required for the interactive picker. Pass a branch name instead.${NC}"
+      exit 1
+    fi
     if ! command -v fzf &>/dev/null; then
       echo -e "${RED}fzf is required for interactive selection.${NC}"
       exit 1
@@ -999,14 +1076,9 @@ cmd_checkout() {
     echo ""
   fi
 
-  # Fetch branch via Graphite or GitHub CLI, then create worktree
-  FETCH_BRANCH=""
-  if fetch_remote_branch "$branch"; then
-    cmd_create "$FETCH_BRANCH"
-  else
-    echo -e "${RED}Failed to fetch branch: ${branch}${NC}"
-    exit 1
-  fi
+  # cmd_create detects whether the branch is local, remote-only, or new and
+  # acquires it non-destructively — so checkout is just "resolve a name, create".
+  cmd_create "$branch"
 }
 
 remove_one() {
