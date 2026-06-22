@@ -38,7 +38,52 @@ else
 fi
 
 echo "Building skim (ReleaseFast) with Zig $SKIM_ZIG..."
-(cd "$SKIM_SRC" && mise exec "zig@$SKIM_ZIG" -- zig build -Doptimize=ReleaseFast)
+
+# macOS 26+ (Tahoe) workaround. Zig 0.15.x cannot link against the macOS 26 SDK:
+# its MachO linker can't follow that SDK's new libSystem reexport chain, so every
+# libc symbol (_abort, _free, __availability_version_check, ...) comes up
+# undefined and the build — including zig's own build runner — fails to link.
+# skim pins Zig 0.15.1 and deliberately won't move to 0.16 (see build.zig.zon),
+# so we sidestep the new SDK by pointing DEVELOPER_DIR at a throwaway tree that
+# exposes only the newest pre-26 SDK we can find. Zig picks the highest-versioned
+# SDK under DEVELOPER_DIR, and a binary linked against the 15.x SDK still runs on
+# macOS 26. Remove this once skim (and vaxis) support a Zig that links the 26 SDK.
+skim_devdir=""
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  sdk_major="$(xcrun --show-sdk-version 2>/dev/null | cut -d. -f1)" || true
+  if [[ "${sdk_major:-0}" -ge 26 ]]; then
+    old_sdk=""; old_ver=-1
+    for sdk_root in \
+      /Library/Developer/CommandLineTools/SDKs \
+      "$(xcode-select -p 2>/dev/null)/Platforms/MacOSX.platform/Developer/SDKs"; do
+      [[ -d "$sdk_root" ]] || continue
+      for sdk in "$sdk_root"/MacOSX*.sdk; do
+        [[ -e "$sdk" ]] || continue
+        ver="${sdk##*/MacOSX}"; ver="${ver%.sdk}"; maj="${ver%%.*}"
+        [[ "$maj" =~ ^[0-9]+$ ]] || continue
+        if (( maj < 26 && maj > old_ver )); then old_ver="$maj"; old_sdk="$sdk"; fi
+      done
+    done
+    if [[ -n "$old_sdk" ]]; then
+      echo "  macOS $(sw_vers -productVersion) SDK is too new for Zig $SKIM_ZIG;"
+      echo "  building against $(basename "$old_sdk")."
+      skim_devdir="$(mktemp -d)"
+      mkdir -p "$skim_devdir/Platforms/MacOSX.platform/Developer/SDKs"
+      ln -s "$old_sdk" "$skim_devdir/Platforms/MacOSX.platform/Developer/SDKs/$(basename "$old_sdk")"
+    else
+      echo "  WARNING: macOS SDK >= 26 detected but no older SDK found; the Zig" >&2
+      echo "  build will likely fail to link. Install the Command Line Tools or" >&2
+      echo "  an older MacOSX*.sdk and re-run." >&2
+    fi
+  fi
+fi
+
+if [[ -n "$skim_devdir" ]]; then
+  (cd "$SKIM_SRC" && DEVELOPER_DIR="$skim_devdir" mise exec "zig@$SKIM_ZIG" -- zig build -Doptimize=ReleaseFast)
+  rm -rf "$skim_devdir"
+else
+  (cd "$SKIM_SRC" && mise exec "zig@$SKIM_ZIG" -- zig build -Doptimize=ReleaseFast)
+fi
 
 mkdir -p "$HOME/.local/bin"
 install -m 755 "$SKIM_SRC/zig-out/bin/skim" "$SKIM_BIN"
