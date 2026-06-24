@@ -88,7 +88,9 @@ ln -sf "$SCRIPT_DIR/bin/scope" "$HOME/.local/bin/scope"
 ln -sf "$SCRIPT_DIR/bin/nxs" "$HOME/.local/bin/nxs"
 ln -sf "$SCRIPT_DIR/bin/swapsize" "$HOME/.local/bin/swapsize"
 ln -sf "$SCRIPT_DIR/bin/tsgo-shim" "$HOME/.local/bin/tsgo-shim"
-echo "Symlinked db-worktree, wt, pg, cmux-ws, syshealth, scope, nxs, swapsize, tsgo-shim to ~/.local/bin/"
+ln -sf "$SCRIPT_DIR/bin/env-init" "$HOME/.local/bin/env-init"
+ln -sf "$SCRIPT_DIR/bin/env-revert" "$HOME/.local/bin/env-revert"
+echo "Symlinked db-worktree, wt, pg, cmux-ws, syshealth, scope, nxs, swapsize, tsgo-shim, env-init, env-revert to ~/.local/bin/"
 
 # tmux config
 mkdir -p "$HOME/.config/tmux"

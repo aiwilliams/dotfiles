@@ -14,6 +14,8 @@
 #   wt main                             Switch to the main worktree
 #   wt merged                           Show worktrees whose branch PR has been merged
 #   wt switch [N|wtN|main]               Switch to worktree (fzf picker if no arg)
+#   wt env-init                         Reinitialize .env from .env.example, keeping current values
+#   wt env-revert [timestamp]           Restore .env from a backup (fzf picker if no arg)
 #   wt env-sync                         Copy main .env to all worktrees
 #   wt env-diff                         Preview what env-sync would change in each worktree
 #   wt agent-env                        Write .env.agent for current worktree
@@ -69,6 +71,11 @@ repo_name() {
 # Get the .env file path within a worktree
 env_file_for() {
   echo "$1/apps/platform/.env"
+}
+
+# Get the .env.example template path within a worktree
+example_file_for() {
+  echo "$1/apps/platform/.env.example"
 }
 
 # Scan sibling directories matching <repo>-wt[0-9]* and return the lowest
@@ -374,6 +381,8 @@ Commands:
   list                           List all worktrees with ID, branch, port, and status
   main                           Switch to the main worktree
   switch [N|wtN|main]            Switch to worktree (interactive fzf picker if no arg)
+  env-init                       Reinitialize this worktree's .env from .env.example, keeping current values
+  env-revert [timestamp]         Restore this worktree's .env from a backup (fzf picker if no arg)
   env-sync                       Copy main .env to all worktrees, preserving wt-specific vars
   env-diff                       Show what wt env-sync would change in each worktree
   agent-env                      Write .env.agent for current worktree
@@ -512,6 +521,48 @@ COMMANDS
     Show worktrees whose branch has a merged PR on GitHub. Useful for
     finding worktrees that can be cleaned up with wt remove. Uses the
     gh CLI to check PR status, which works correctly with squash merges.
+
+  wt env-init
+
+    Reinitialize the current worktree's apps/platform/.env from the project's
+    apps/platform/.env.example template, carrying your existing values forward.
+
+    Runs the standalone `env-init` tool (TypeScript on Bun, unit-tested) which:
+
+      1. Backs up the current .env to .env.backup.<timestamp> (never clobbered).
+      2. Starts the new .env from .env.example, preserving its comments/order.
+         The template defines the shape; your old .env provides the values.
+      3. For every key the template knows — active OR commented out — keeps YOUR
+         value and YOUR active/commented state, so a refresh never loses a value
+         or silently flips a setting you'd enabled/disabled. Commented values in
+         your old .env are still used as a source, not ignored.
+      4. Walks you through the differences:
+           - keys where the template's active default differs from yours, in an
+             arrow-key checkbox list (space to take the team's value, enter to
+             confirm) — kept yours unless you check them; the highlighted row
+             shows both full values so you can compare them,
+           - keys only in your old .env, in a checkbox list that starts all
+             checked (checked = keep, unchecked = drop), so nothing is lost
+             unless you opt out; the highlighted row shows its full value, and
+           - new active template keys you have no value for (set which now?).
+
+    Use this after the template gains or drops keys, to resync your .env to the
+    template's shape without losing your real values. Operates on the current
+    worktree (main included); requires bun.
+
+  wt env-revert [timestamp]
+
+    Restore this worktree's apps/platform/.env from one of the timestamped
+    backups env-init (and env-revert itself) leave beside it.
+
+    With no argument, opens an fzf picker of backups (newest first) with a live
+    preview of exactly what reverting to each one would change. Pass a timestamp
+    (YYYYMMDD-HHMMSSmmm, as shown in the picker / backup filenames) to skip the
+    picker.
+
+    Reverting is non-destructive: the current .env is backed up first, so a
+    revert can itself be reverted. Operates on the current worktree (main
+    included); requires bun, and fzf for the interactive picker.
 
   wt env-sync
 
@@ -2272,6 +2323,62 @@ cmd_agent_env() {
   write_agent_env "$wt_dir" "$wt_id"
 }
 
+cmd_env_init() {
+  local wt_id
+  wt_id=$(current_worktree_id) || exit 1
+
+  local wt_dir
+  if [[ "$wt_id" == "main" ]]; then
+    wt_dir=$(main_worktree_dir)
+  else
+    wt_dir=$(worktree_dir_for_number "${wt_id#wt}")
+  fi
+
+  local env_file example_file
+  env_file=$(env_file_for "$wt_dir")
+  example_file=$(example_file_for "$wt_dir")
+
+  if [[ ! -f "$example_file" ]]; then
+    echo -e "${RED}No .env.example found: ${example_file}${NC}"
+    echo -e "${DIM}env-init reinitializes .env from the project's .env.example template.${NC}"
+    exit 1
+  fi
+
+  if ! command -v bun &>/dev/null; then
+    echo -e "${RED}bun is required for 'wt env-init'.${NC} ${DIM}Install it (e.g. via mise) and retry.${NC}"
+    exit 1
+  fi
+
+  # env-init lives alongside wt in the real bin dir (SCRIPT_DIR follows the
+  # symlink), so it's found regardless of how wt was invoked. It owns the
+  # backup, the interactive reconcile, and writing the new .env.
+  exec "$SCRIPT_DIR/env-init" --env "$env_file" --example "$example_file" --label "$wt_id"
+}
+
+cmd_env_revert() {
+  local wt_id
+  wt_id=$(current_worktree_id) || exit 1
+
+  local wt_dir
+  if [[ "$wt_id" == "main" ]]; then
+    wt_dir=$(main_worktree_dir)
+  else
+    wt_dir=$(worktree_dir_for_number "${wt_id#wt}")
+  fi
+
+  if ! command -v bun &>/dev/null; then
+    echo -e "${RED}bun is required for 'wt env-revert'.${NC} ${DIM}Install it (e.g. via mise) and retry.${NC}"
+    exit 1
+  fi
+
+  # env-revert finds the .env.backup.* files beside .env, shows an fzf picker
+  # (or accepts a timestamp arg), and restores non-destructively. Any extra
+  # args (e.g. a timestamp) are passed through.
+  local env_file
+  env_file=$(env_file_for "$wt_dir")
+  exec "$SCRIPT_DIR/env-revert" --env "$env_file" --label "$wt_id" "$@"
+}
+
 cmd_env_sync() {
   local main_dir
   main_dir=$(main_worktree_dir)
@@ -3208,6 +3315,8 @@ case "$command" in
   main)       cmd_main ;;
   switch)     cmd_switch "$@" ;;
   install)    cmd_install "$@" ;;
+  env-init)      cmd_env_init ;;
+  env-revert)    cmd_env_revert "$@" ;;
   env-sync)      cmd_env_sync ;;
   env-diff)      cmd_env_diff ;;
   agent-env)     cmd_agent_env ;;

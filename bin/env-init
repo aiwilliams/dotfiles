@@ -1,0 +1,465 @@
+#!/usr/bin/env bun
+// env-init — reinitialize a .env from a fresh .env.example, carrying forward the
+// values from your current .env, then interactively reconcile the differences.
+//
+// Steps:
+//   1. Back up the current .env (timestamped, never clobbered).
+//   2. Start the new .env from .env.example.
+//   3. For every key present in both, keep your previous value.
+//   4. Show the keys that exist in only one file and ask, per row, which of your
+//      old keys to carry over and which new keys you want to set a value for now.
+//
+// The reconciliation logic lives in ../lib/env-init.ts and is unit-tested with
+// `bun test`; this file is only the I/O shell (files, prompts, output).
+
+import { basename, dirname, join, resolve } from "node:path";
+import {
+  appendCarried,
+  applyValues,
+  parseEnvLines,
+  reconcile,
+  serialize,
+  parseSelection,
+  type KeyValue,
+  type ChangedEntry,
+  type BackupEntry,
+} from "../lib/env-init.ts";
+import { formatBackupTimestamp } from "../lib/env-backup.ts";
+import {
+  initCheckboxState,
+  reduceCheckbox,
+  decodeKey,
+  splitKeys,
+  renderCheckbox,
+  selectedIndices,
+  wrapHard,
+  type CheckboxItem,
+} from "../lib/checkbox.ts";
+
+const C = {
+  red: "\x1b[0;31m",
+  green: "\x1b[0;32m",
+  yellow: "\x1b[0;33m",
+  cyan: "\x1b[0;36m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  nc: "\x1b[0m",
+};
+
+function die(msg: string): never {
+  console.error(`${C.red}${msg}${C.nc}`);
+  process.exit(1);
+}
+
+const HELP = `env-init — reinitialize a .env from .env.example, keeping your values.
+
+Usage:
+  env-init [--env <path>] [--example <path>] [--label <name>] [--yes]
+
+Options:
+  --env <path>      .env to reinitialize       (default: apps/platform/.env)
+  --example <path>  .env.example template       (default: <env-dir>/.env.example)
+  --label <name>    Label shown in messages     (e.g. a worktree id like wt3)
+  -y, --yes         Non-interactive: carry over every old-only key and keep the
+                    example defaults for every new key. No prompts.
+  -h, --help        Show this help.
+
+Backs up the current .env to <env>.backup.<timestamp> before writing.`;
+
+interface Args {
+  env: string;
+  example: string;
+  label: string;
+  yes: boolean;
+}
+
+function parseArgs(argv: string[]): Args {
+  let env = "";
+  let example = "";
+  let label = "";
+  let yes = false;
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case "-h":
+      case "--help":
+        console.log(HELP);
+        process.exit(0);
+        break;
+      case "--env":
+        env = argv[++i] ?? die("--env requires a path");
+        break;
+      case "--example":
+        example = argv[++i] ?? die("--example requires a path");
+        break;
+      case "--label":
+        label = argv[++i] ?? die("--label requires a value");
+        break;
+      case "-y":
+      case "--yes":
+        yes = true;
+        break;
+      default:
+        die(`Unknown argument: ${a}`);
+    }
+  }
+
+  env = resolve(env || "apps/platform/.env");
+  example = resolve(example || join(dirname(env), ".env.example"));
+  return { env, example, label, yes };
+}
+
+/**
+ * A 2-space-padded, column-aligned numbered table of key=value rows. Rows that
+ * were commented out in the source are shown with a leading `#` so it's clear
+ * they'd be re-added commented.
+ */
+function renderTable(rows: Array<KeyValue & { commented?: boolean }>, valueLabel: string): string {
+  const dispKey = (r: KeyValue & { commented?: boolean }) => (r.commented ? "#" : "") + r.key;
+  const numW = String(rows.length).length;
+  const keyW = Math.max(...rows.map((r) => dispKey(r).length), 3);
+  const header =
+    `  ${"#".padStart(numW)}  ${"KEY".padEnd(keyW)}  ${valueLabel}`;
+  const body = rows.map((r, i) => {
+    const n = String(i + 1).padStart(numW);
+    return `  ${C.dim}${n}${C.nc}  ${dispKey(r).padEnd(keyW)}  ${C.dim}${preview(r.value)}${C.nc}`;
+  });
+  return [header, ...body].join("\n");
+}
+
+/** A numbered table contrasting your value with the template's default. */
+function renderChangedTable(rows: ChangedEntry[]): string {
+  const numW = String(rows.length).length;
+  const keyW = Math.max(...rows.map((r) => r.key.length), 3);
+  const header = `  ${"#".padStart(numW)}  ${"KEY".padEnd(keyW)}  YOURS ${C.dim}→${C.nc} TEMPLATE`;
+  const body = rows.map((r, i) => {
+    const n = String(i + 1).padStart(numW);
+    return (
+      `  ${C.dim}${n}${C.nc}  ${r.key.padEnd(keyW)}  ` +
+      `${preview(r.mine, 28)} ${C.dim}→${C.nc} ${C.green}${preview(r.theirs, 28)}${C.nc}`
+    );
+  });
+  return [header, ...body].join("\n");
+}
+
+/** Truncate long values so the table stays readable. */
+function preview(value: string, max = 60): string {
+  return value.length > max ? value.slice(0, max - 1) + "…" : value;
+}
+
+/** Terminal width, defaulting to 80 when unknown. */
+function termCols(): number {
+  return process.stdout.columns && process.stdout.columns > 0 ? process.stdout.columns : 80;
+}
+
+const DETAIL_LABEL_W = 8; // "theirs: " / "value:  "
+
+/**
+ * One labeled, hard-wrapped value for the detail panel, capped at `maxLines`
+ * (the last shown line gets an … when the value is longer). Continuation lines
+ * are indented under the label.
+ */
+function wrapLabeled(label: string, value: string, cols: number, maxLines: number, color = C.nc): string[] {
+  if (maxLines <= 0) return [];
+  const innerW = Math.max(10, cols - 2 - DETAIL_LABEL_W - 1);
+  let chunks = wrapHard(value, innerW);
+  if (chunks.length > maxLines) {
+    chunks = chunks.slice(0, maxLines);
+    const last = chunks[chunks.length - 1];
+    chunks[chunks.length - 1] = last.slice(0, Math.max(0, innerW - 1)) + "…";
+  }
+  return chunks.map((ch, i) => {
+    const lead = i === 0 ? `${label}:`.padEnd(DETAIL_LABEL_W) : " ".repeat(DETAIL_LABEL_W);
+    return `  ${C.dim}${lead}${C.nc}${color}${ch}${C.nc}`;
+  });
+}
+
+/**
+ * Full (untruncated) yours/theirs values for the highlighted changed row,
+ * stacked under "yours:"/"theirs:", split within `budget` lines.
+ */
+function changedDetail(c: ChangedEntry, cols: number, budget: number): string[] {
+  if (budget <= 0) return [];
+  if (budget === 1) return [`${C.dim}  (window too short to show full values)${C.nc}`];
+  const perSide = Math.max(1, Math.floor(budget / 2));
+  return [
+    ...wrapLabeled("yours", c.mine, cols, perSide),
+    ...wrapLabeled("theirs", c.theirs, cols, perSide, C.green),
+  ];
+}
+
+/** Full value for the highlighted backup-only row, under a "value:" label. */
+function backupDetail(b: BackupEntry, cols: number, budget: number): string[] {
+  if (budget <= 0) return [];
+  const note = b.commented ? [`  ${C.dim}(was commented out in your .env)${C.nc}`] : [];
+  return [...note, ...wrapLabeled("value", b.value, cols, budget - note.length)];
+}
+
+/**
+ * Interactive checkbox multi-select: ↑/↓ to move, space to toggle, a/n/i for
+ * all/none/invert, enter to confirm, esc to confirm-as-is. Returns the checked
+ * indices, or null if no usable TTY (or the list is taller than the terminal),
+ * so the caller can fall back to a typed prompt. Ctrl-C aborts the program.
+ *
+ * opts.detail, if given, renders extra lines for the highlighted row (e.g. the
+ * full untruncated values) within a per-draw `budget` of lines, so the panel
+ * grows/shrinks as you move without overflowing the screen. opts.initialChecked
+ * sets the starting checked mask (defaults to all unchecked).
+ */
+async function runCheckbox(
+  items: CheckboxItem[],
+  opts: {
+    detail?: (index: number, budget: number) => string[];
+    initialChecked?: boolean[];
+    footer?: string;
+  } = {},
+): Promise<number[] | null> {
+  const stdin = process.stdin;
+  const stdout = process.stdout;
+  if (!stdin.isTTY || !stdout.isTTY) return null;
+  // The list + footer must fit; otherwise the redraw math (moving the cursor up
+  // a known number of lines) breaks. A falsy rows (0/undefined — e.g. a window
+  // with no reported size) is treated as unknown, defaulting conservatively.
+  const rows = stdout.rows && stdout.rows > 0 ? stdout.rows : 24;
+  if (items.length + 2 > rows) return null;
+
+  const footer =
+    opts.footer ??
+    `${C.dim}  ↑/↓ move · space toggle · a/n all/none · enter confirm · esc keep yours${C.nc}`;
+  let state = initCheckboxState(items.length, opts.initialChecked);
+  let prevCount = 0;
+  let drawn = false;
+
+  const draw = () => {
+    const listLines = renderCheckbox(items, state).map((l, i) =>
+      i === state.cursor ? `${C.bold}${C.cyan}${l}${C.nc}` : l,
+    );
+    const block = [...listLines];
+    if (opts.detail) {
+      // Reserve room for the list, a blank, and the footer; give the rest to
+      // the detail panel so the whole block stays within the screen height.
+      const budget = Math.max(0, rows - listLines.length - 3);
+      block.push("", ...opts.detail(state.cursor, budget));
+    }
+    block.push("", footer);
+    if (drawn) stdout.write(`\x1b[${prevCount}A`); // back to top of previous block
+    stdout.write("\r\x1b[0J"); // clear from here to end of screen (handles shrink)
+    stdout.write(block.join("\n") + "\n");
+    prevCount = block.length;
+    drawn = true;
+  };
+
+  stdout.write("\x1b[?25l"); // hide cursor
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.setEncoding("utf8");
+  draw();
+
+  return await new Promise<number[] | null>((resolve) => {
+    const cleanup = () => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdout.write("\x1b[?25h"); // show cursor
+    };
+    const onData = (chunk: string) => {
+      let changed = false;
+      // A chunk may batch several keystrokes (fast repeat / paste); handle each.
+      for (const token of splitKeys(chunk)) {
+        const key = decodeKey(token);
+        if (key === "abort") {
+          cleanup();
+          stdout.write("\n");
+          process.exit(130);
+        }
+        if (key === "submit" || key === "cancel") {
+          cleanup();
+          resolve(selectedIndices(state));
+          return;
+        }
+        const next = reduceCheckbox(state, key);
+        if (next !== state) {
+          state = next;
+          changed = true;
+        }
+      }
+      if (changed) draw();
+    };
+    stdin.on("data", onData);
+  });
+}
+
+/** Prompt repeatedly until the selection parses; returns 0-based indices. */
+function promptSelection(question: string, count: number): number[] {
+  while (true) {
+    const answer = prompt(question) ?? "";
+    try {
+      return parseSelection(answer, count);
+    } catch (e) {
+      console.error(`  ${C.red}${(e as Error).message}. Try again.${C.nc}`);
+    }
+  }
+}
+
+async function main() {
+  const { env, example, label, yes } = parseArgs(process.argv.slice(2));
+  const where = label ? `${C.dim}(${label})${C.nc} ` : "";
+
+  const exampleFile = Bun.file(example);
+  if (!(await exampleFile.exists())) {
+    die(`No .env.example found: ${example}`);
+  }
+  const exampleText = await exampleFile.text();
+  const exampleLines = parseEnvLines(exampleText);
+
+  const envFile = Bun.file(env);
+  const hadEnv = await envFile.exists();
+  const backupText = hadEnv ? await envFile.text() : "";
+  const backupLines = parseEnvLines(backupText);
+
+  console.log(
+    `${C.bold}env-init${C.nc} ${where}${C.dim}${env}${C.nc}`,
+  );
+  console.log(`  template: ${C.dim}${example}${C.nc}`);
+
+  // 1. Back up the current .env.
+  if (hadEnv) {
+    const backupPath = `${env}.backup.${formatBackupTimestamp(new Date())}`;
+    await Bun.write(backupPath, backupText);
+    console.log(`  ${C.green}Backed up${C.nc} → ${C.dim}${basename(backupPath)}${C.nc}`);
+  } else {
+    console.log(
+      `  ${C.yellow}No existing .env${C.nc} ${C.dim}— creating fresh from the template.${C.nc}`,
+    );
+  }
+
+  // 2 + 3. Start from the example (which defines the shape). For keys you
+  // already have, your value AND your active/commented state win — refresh
+  // without losing or silently flipping your settings.
+  const { merged, carriedOver, changed, backupOnly, exampleOnly } = reconcile(
+    exampleLines,
+    backupLines,
+  );
+  console.log(
+    `  ${C.green}Kept ${carriedOver.length}${C.nc} of your value(s) for keys the template knows.`,
+  );
+
+  // 4. Reconcile the differences.
+  let lines = merged;
+
+  // 4a. Keys where the team's active default differs from yours — opt in per row.
+  if (changed.length > 0) {
+    console.log("");
+    console.log(
+      `${C.bold}Template default differs from yours${C.nc} ${C.dim}(check the ones to take the team's value):${C.nc}`,
+    );
+    let pick: number[];
+    if (yes) {
+      console.log(renderChangedTable(changed));
+      pick = [];
+      console.log(`  ${C.dim}--yes: keeping your values.${C.nc}`);
+    } else {
+      const items: CheckboxItem[] = changed.map((c) => ({
+        label: c.key,
+        hint: `${preview(c.mine, 28)} → ${preview(c.theirs, 28)}`,
+      }));
+      const viaTui = await runCheckbox(items, {
+        detail: (i, budget) => changedDetail(changed[i], termCols(), budget),
+      });
+      if (viaTui !== null) {
+        pick = viaTui;
+      } else {
+        // No TTY (piped/headless): fall back to a typed numbered selection.
+        console.log(renderChangedTable(changed));
+        pick = promptSelection(
+          `${C.bold}Take the template's value for which?${C.nc} [e.g. 1 3, 1-2, all, none]: `,
+          changed.length,
+        );
+      }
+    }
+    const adopt = new Map<string, string>();
+    for (const i of pick) adopt.set(changed[i].key, changed[i].theirs);
+    lines = applyValues(lines, adopt);
+    if (adopt.size > 0) console.log(`  ${C.green}Adopted ${adopt.size} template value(s).${C.nc}`);
+  }
+
+  // 4b. Keys only in your old .env — checked = keep, unchecked = drop. Default
+  // is keep-all, so a refresh never loses your custom vars unless you opt out.
+  if (backupOnly.length > 0) {
+    console.log("");
+    console.log(
+      `${C.bold}Keys only in your old .env${C.nc} ${C.dim}(checked = keep, unchecked = drop):${C.nc}`,
+    );
+    let keep: number[];
+    if (yes) {
+      keep = backupOnly.map((_, i) => i);
+      console.log(`  ${C.dim}--yes: keeping all.${C.nc}`);
+    } else {
+      const items: CheckboxItem[] = backupOnly.map((b) => ({
+        label: (b.commented ? "#" : "") + b.key,
+        hint: preview(b.value, 40),
+      }));
+      const viaTui = await runCheckbox(items, {
+        initialChecked: backupOnly.map(() => true),
+        detail: (i, budget) => backupDetail(backupOnly[i], termCols(), budget),
+        footer: `${C.dim}  ↑/↓ move · space keep/drop · a/n keep/drop all · enter confirm · esc keep checked${C.nc}`,
+      });
+      if (viaTui !== null) {
+        keep = viaTui;
+      } else {
+        // No TTY (piped/headless): default keep all; type which to DROP.
+        console.log(renderTable(backupOnly, "OLD VALUE"));
+        const drop = new Set(
+          promptSelection(
+            `${C.bold}Drop which?${C.nc} [e.g. 1 3, 1-2, all, none — blank keeps all]: `,
+            backupOnly.length,
+          ),
+        );
+        keep = backupOnly.map((_, i) => i).filter((i) => !drop.has(i));
+      }
+    }
+    const additions = keep.map((i) => backupOnly[i]);
+    lines = appendCarried(lines, additions);
+    const dropped = backupOnly.length - additions.length;
+    console.log(
+      `  ${C.green}Kept ${additions.length}${C.nc}` +
+        (dropped > 0 ? `${C.dim}, dropped ${dropped}${C.nc}` : "") +
+        ` of your old-only key(s).`,
+    );
+  }
+
+  if (exampleOnly.length > 0) {
+    console.log("");
+    console.log(
+      `${C.bold}New keys from the template${C.nc} ${C.dim}(unset rows keep the example default):${C.nc}`,
+    );
+    console.log(renderTable(exampleOnly, "EXAMPLE DEFAULT"));
+    let pick: number[];
+    if (yes) {
+      pick = [];
+      console.log(`  ${C.dim}--yes: keeping example defaults.${C.nc}`);
+    } else {
+      pick = promptSelection(
+        `${C.bold}Provide a value for which?${C.nc} [e.g. 1 3, 1-2, all, none]: `,
+        exampleOnly.length,
+      );
+    }
+    const provided = new Map<string, string>();
+    for (const i of pick) {
+      const { key, value } = exampleOnly[i];
+      const entered = prompt(`  ${key}= ${C.dim}(default: ${preview(value)})${C.nc} `) ?? "";
+      if (entered !== "") provided.set(key, entered);
+    }
+    lines = applyValues(lines, provided);
+    if (provided.size > 0) console.log(`  ${C.green}Set ${provided.size} value(s).${C.nc}`);
+  }
+
+  await Bun.write(env, serialize(lines));
+  console.log("");
+  console.log(`${C.bold}Wrote${C.nc} ${C.dim}${env}${C.nc}`);
+}
+
+if (import.meta.main) {
+  main().catch((e) => die(e instanceof Error ? e.message : String(e)));
+}

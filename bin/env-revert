@@ -1,0 +1,294 @@
+#!/usr/bin/env bun
+// env-revert — restore a .env from one of the timestamped backups env-init
+// writes. Shows a fuzzy (fzf) picker of backups, newest first, with a live
+// preview of exactly what reverting to each one would change.
+//
+// Reverting is itself non-destructive: the current .env is backed up first
+// (using the same .env.backup.<timestamp> naming), so a revert can be reverted.
+//
+// Backup discovery, timestamp parsing, and the diff live in ../lib/env-backup.ts
+// and are unit-tested with `bun test`; this file is only the I/O shell.
+
+import { basename, dirname, join, resolve } from "node:path";
+import { readdir, stat } from "node:fs/promises";
+import {
+  backupTimestampFromName,
+  diffEnv,
+  formatBackupDisplay,
+  formatBackupTimestamp,
+  formatSize,
+  isNoopDiff,
+  parseBackupTimestamp,
+  relativeAge,
+  sortByTimestampDesc,
+  type EnvDiff,
+} from "../lib/env-backup.ts";
+
+const C = {
+  red: "\x1b[0;31m",
+  green: "\x1b[0;32m",
+  yellow: "\x1b[0;33m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  nc: "\x1b[0m",
+};
+
+function die(msg: string): never {
+  console.error(`${C.red}${msg}${C.nc}`);
+  process.exit(1);
+}
+
+const HELP = `env-revert — restore a .env from a timestamped env-init backup.
+
+Usage:
+  env-revert [--env <path>] [--label <name>] [--yes] [<timestamp>]
+
+Options:
+  --env <path>      .env to restore             (default: apps/platform/.env)
+  --label <name>    Label shown in messages     (e.g. a worktree id like wt3)
+  -y, --yes         Skip the confirmation prompt.
+  <timestamp>       Revert to this exact backup (YYYYMMDD-HHMMSS), skipping the
+                    fzf picker. Without it, an interactive picker opens.
+  -h, --help        Show this help.
+
+Backs up the current .env before overwriting it, so a revert is reversible.`;
+
+interface Args {
+  env: string;
+  label: string;
+  yes: boolean;
+  timestamp: string;
+  previewTimestamp: string; // internal: fzf preview callback
+}
+
+function parseArgs(argv: string[]): Args {
+  let env = "";
+  let label = "";
+  let yes = false;
+  let timestamp = "";
+  let previewTimestamp = "";
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case "-h":
+      case "--help":
+        console.log(HELP);
+        process.exit(0);
+        break;
+      case "--env":
+        env = argv[++i] ?? die("--env requires a path");
+        break;
+      case "--label":
+        label = argv[++i] ?? die("--label requires a value");
+        break;
+      case "-y":
+      case "--yes":
+        yes = true;
+        break;
+      case "--diff": // internal: invoked by the fzf preview window
+        previewTimestamp = argv[++i] ?? "";
+        break;
+      default:
+        if (a.startsWith("-")) die(`Unknown argument: ${a}`);
+        if (timestamp) die(`Unexpected argument: ${a}`);
+        timestamp = a;
+    }
+  }
+
+  env = resolve(env || "apps/platform/.env");
+  return { env, label, yes, timestamp: timestamp.trim(), previewTimestamp: previewTimestamp.trim() };
+}
+
+interface BackupFile {
+  timestamp: string;
+  date: Date;
+  path: string;
+  size: number;
+}
+
+/** Find every <basename>.backup.<timestamp> next to the env file, newest first. */
+async function findBackups(env: string): Promise<BackupFile[]> {
+  const dir = dirname(env);
+  const base = basename(env);
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return [];
+  }
+  const found: BackupFile[] = [];
+  for (const name of names) {
+    const ts = backupTimestampFromName(name, base);
+    if (!ts) continue;
+    const path = join(dir, name);
+    let size = 0;
+    try {
+      size = (await stat(path)).size;
+    } catch {
+      continue;
+    }
+    found.push({ timestamp: ts, date: parseBackupTimestamp(ts)!, path, size });
+  }
+  return sortByTimestampDesc(found);
+}
+
+function renderDiff(d: EnvDiff): string {
+  if (isNoopDiff(d)) return `${C.dim}No changes — this backup matches the current .env.${C.nc}`;
+  const out: string[] = [];
+  if (d.changed.length) {
+    out.push(`${C.yellow}Will change${C.nc} (${d.changed.length}):`);
+    for (const c of d.changed) {
+      out.push(`  ${c.key}`);
+      out.push(`    ${C.red}- ${c.from}${C.nc}`);
+      out.push(`    ${C.green}+ ${c.to}${C.nc}`);
+    }
+  }
+  if (d.added.length) {
+    out.push(`${C.green}Will be added${C.nc} (${d.added.length}):`);
+    for (const a of d.added) out.push(`  ${a.key}=${a.value}`);
+  }
+  if (d.removed.length) {
+    out.push(`${C.red}Will be removed${C.nc} (${d.removed.length}):`);
+    for (const r of d.removed) out.push(`  ${r.key}=${r.value}`);
+  }
+  return out.join("\n");
+}
+
+/** shell-single-quote a string for embedding in the fzf preview command. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/** Drive fzf: feed the backup list on stdin, return the chosen timestamp (or ""). */
+async function pickWithFzf(env: string, backups: BackupFile[]): Promise<string> {
+  const self = Bun.main;
+  const bun = process.execPath;
+  // fzf substitutes {1} (field 1 = timestamp) into the preview command, which
+  // re-invokes us in --diff mode to render that backup's diff.
+  const previewCmd = `${shq(bun)} ${shq(self)} --env ${shq(env)} --diff {1}`;
+
+  // Field 1 is the raw timestamp (hidden via --with-nth) used by the preview
+  // callback and parsed from the selection; fields 2-4 are the human display.
+  const now = new Date();
+  const rows = backups
+    .map(
+      (b) =>
+        `${b.timestamp}\t${formatBackupDisplay(b.date)}\t${relativeAge(b.date, now)}\t${formatSize(b.size)}`,
+    )
+    .join("\n");
+
+  const proc = Bun.spawn(
+    [
+      "fzf",
+      "--delimiter", "\t",
+      "--with-nth", "2,3,4",
+      "--header", "Revert .env to backup (newest first)",
+      "--preview", previewCmd,
+      "--preview-window", "right,60%,wrap",
+    ],
+    { stdin: "pipe", stdout: "pipe", stderr: "inherit" },
+  );
+  proc.stdin.write(rows + "\n");
+  proc.stdin.end();
+  const selection = (await new Response(proc.stdout).text()).trim();
+  await proc.exited;
+  if (!selection) return "";
+  return selection.split("\t")[0].trim();
+}
+
+async function readText(path: string): Promise<string> {
+  const f = Bun.file(path);
+  return (await f.exists()) ? f.text() : "";
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  // Preview mode: print the diff for one backup and exit (used by fzf).
+  if (args.previewTimestamp) {
+    const backups = await findBackups(args.env);
+    const hit = backups.find((b) => b.timestamp === args.previewTimestamp);
+    if (!hit) {
+      console.log(`${C.red}Backup not found: ${args.previewTimestamp}${C.nc}`);
+      return;
+    }
+    const current = await readText(args.env);
+    const backup = await readText(hit.path);
+    console.log(renderDiff(diffEnv(current, backup)));
+    return;
+  }
+
+  const where = args.label ? `${C.dim}(${args.label})${C.nc} ` : "";
+  const backups = await findBackups(args.env);
+  if (backups.length === 0) {
+    console.log(
+      `${C.yellow}No backups found${C.nc} for ${C.dim}${args.env}${C.nc}` +
+        `\n${C.dim}env-init writes ${basename(args.env)}.backup.<timestamp> beside the .env.${C.nc}`,
+    );
+    return;
+  }
+
+  // Resolve which backup to restore: explicit timestamp, or the fzf picker.
+  let chosen: BackupFile | undefined;
+  if (args.timestamp) {
+    chosen = backups.find((b) => b.timestamp === args.timestamp);
+    if (!chosen) {
+      die(
+        `No backup with timestamp '${args.timestamp}'.\nAvailable: ${backups.map((b) => b.timestamp).join(", ")}`,
+      );
+    }
+  } else {
+    const fzf = Bun.which("fzf");
+    if (!fzf) {
+      die(
+        `fzf is required for the interactive picker, or pass a timestamp.\nAvailable: ${backups.map((b) => b.timestamp).join(", ")}`,
+      );
+    }
+    const ts = await pickWithFzf(args.env, backups);
+    if (!ts) {
+      console.log("Aborted.");
+      return;
+    }
+    chosen = backups.find((b) => b.timestamp === ts);
+    if (!chosen) die(`Selection did not match a known backup: ${ts}`);
+  }
+
+  // Show what reverting will do.
+  const current = await readText(args.env);
+  const backupText = await readText(chosen.path);
+  const d = diffEnv(current, backupText);
+  console.log(
+    `${C.bold}Revert${C.nc} ${where}${C.dim}${args.env}${C.nc}`,
+  );
+  console.log(
+    `  to backup ${C.green}${formatBackupDisplay(chosen.date)}${C.nc} ${C.dim}(${relativeAge(chosen.date, new Date())}, ${formatSize(chosen.size)})${C.nc}`,
+  );
+  console.log(renderDiff(d).split("\n").map((l) => "  " + l).join("\n"));
+
+  if (isNoopDiff(d)) {
+    console.log(`${C.dim}Nothing to do.${C.nc}`);
+    return;
+  }
+
+  // Confirm, then revert non-destructively.
+  if (!args.yes) {
+    const answer = (prompt(`${C.bold}Proceed?${C.nc} [y/N] `) ?? "").trim().toLowerCase();
+    if (answer !== "y" && answer !== "yes") {
+      console.log("Aborted.");
+      return;
+    }
+  }
+
+  if (current !== "") {
+    const safety = `${args.env}.backup.${formatBackupTimestamp(new Date())}`;
+    await Bun.write(safety, current);
+    console.log(`  ${C.green}Backed up current${C.nc} → ${C.dim}${basename(safety)}${C.nc}`);
+  }
+  await Bun.write(args.env, backupText);
+  console.log(`${C.bold}Reverted${C.nc} ${C.dim}${args.env}${C.nc} to ${formatBackupDisplay(chosen.date)}`);
+}
+
+if (import.meta.main) {
+  main().catch((e) => die(e instanceof Error ? e.message : String(e)));
+}

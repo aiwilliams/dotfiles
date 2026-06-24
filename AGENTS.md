@@ -25,6 +25,25 @@ Execute SQL against project databases using connection info from `.env` files. A
 
 Lower-level tool for managing per-worktree PostgreSQL databases directly. Run `db-worktree` with no arguments to see subcommands.
 
+## `env-init` — .env Reinitializer
+
+Reinitializes a `.env` from its `.env.example`, carrying current values forward and interactively reconciling keys that exist in only one file. The example defines the shape (which keys exist and whether each is active or commented out); the old `.env` provides the values. Values transfer into commented-out template keys too (`# KEY=`), which stay commented — and commented values in the old `.env` are still used as a source. Backs up the current `.env` to `<env>.backup.<timestamp>` first. Invoked via `wt env-init` (operates on the current worktree), or standalone: `env-init --env <path> --example <path>`. Run `env-init --help` for usage.
+
+## `env-revert` — .env Backup Restore
+
+Restores a `.env` from one of the `*.backup.*` files `env-init` leaves behind, via an fzf picker (newest first, with a live diff preview) or a direct timestamp. Non-destructive — it backs up the current `.env` before overwriting. Invoked via `wt env-revert [timestamp]`, or standalone: `env-revert --env <path> [timestamp]`. Run `env-revert --help` for usage.
+
 ## Library
 
 Shared functions live in `~/dotfiles/lib/postgres.sh`. Scripts source this file; it is not executed directly.
+
+# TypeScript Tooling
+
+`env-init` and `env-revert` are TypeScript run directly by **Bun** (installed via mise) — no build step, no transpile artifacts. The CLI entries are `bin/env-init` and `bin/env-revert`; their pure, I/O-free logic lives in `lib/env-init.ts`, `lib/env-backup.ts`, and `lib/checkbox.ts` (the arrow-key/spacebar multi-select state machine env-init uses for the "differs from template" step) so it can be unit-tested. The raw-terminal TUI in `bin/env-init` falls back to a typed numbered prompt when there's no TTY (piped/headless). These bin scripts are skipped by the pre-commit shellcheck because their shebang is `bun`, not `bash`.
+
+Run the tests:
+
+```bash
+bun test            # globs *.test.ts (lib/env-init.test.ts, lib/env-backup.test.ts)
+bun test lib/env-backup.test.ts   # a single file
+```
