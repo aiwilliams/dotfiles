@@ -24,6 +24,14 @@ brew_install_cask ngrok
 
 echo "Installing Colima + Docker CLI..."
 brew_install colima docker docker-compose
+# Homebrew installs docker-compose as a standalone binary and symlinks it into
+# its own cli-plugins dir under $(brew --prefix), but the docker CLI doesn't
+# search that prefix on macOS — so `docker compose` (the space form used by our
+# package.json scripts and matching the Linux docker-compose-v2 plugin) fails
+# with "unknown shorthand flag: 'd'". Symlink it where docker does look.
+mkdir -p "$HOME/.docker/cli-plugins"
+ln -sfn "$(brew --prefix)/opt/docker-compose/bin/docker-compose" \
+  "$HOME/.docker/cli-plugins/docker-compose"
 if ! colima status &>/dev/null 2>&1; then
   colima start
 fi
