@@ -20,6 +20,8 @@ export PATH="$HOME/.local/bin:$PATH"
 # Install global tools (idempotent — skips if already at latest)
 mise use -g node@latest
 mise use -g pnpm@latest
+# bun powers the env-init/env-revert helpers invoked by `wt env-init`.
+mise use -g bun@latest
 # Pinned to the 3.13 series: python@latest currently resolves to a freethreaded
 # 3.14 build from python-build-standalone that installs without a lib/ directory.
 mise use -g python@3.13
