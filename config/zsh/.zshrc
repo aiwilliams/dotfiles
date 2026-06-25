@@ -16,6 +16,12 @@ export PNPM_HOME="$HOME/.local/share/pnpm"
 export PATH="$HOME/.local/bin:$PNPM_HOME:$PATH"
 export NX_TUI=false
 
+# Homebrew on Linux — puts brew-installed tools (e.g. Graphite's gt) on PATH.
+# Harmless on macOS, where these prefixes don't exist (brew shellenv is set up
+# by its installer in ~/.zprofile). See https://docs.brew.sh/Homebrew-on-Linux.
+[ -d /home/linuxbrew/.linuxbrew ] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+[ -d "$HOME/.linuxbrew" ] && eval "$("$HOME/.linuxbrew/bin/brew" shellenv)"
+
 # --- Aliases & Functions ---
 
 # Neovim v0.11+ sends a DA1 query (\e[c) during its exit cleanup, just before

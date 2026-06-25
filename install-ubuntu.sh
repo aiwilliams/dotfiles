@@ -10,6 +10,21 @@ echo "Running Ubuntu setup..."
 sudo apt-get update -y
 sudo apt-get install -y zsh tmux keychain build-essential python3 curl ca-certificates fzf shellcheck docker.io docker-compose-v2
 
+# --- Homebrew (Linux) ---
+#
+# Installed for one thing only: the Graphite CLI (gt), as a standalone prebuilt
+# binary that's decoupled from any project's Node version (see lib/dev-tools.sh).
+# Everything else on Linux stays on apt — do NOT migrate other packages to brew.
+# Deps + prefix per https://docs.brew.sh/Homebrew-on-Linux. The installer must
+# run as the normal user (it uses sudo itself); never run it as root.
+
+if [ ! -x /home/linuxbrew/.linuxbrew/bin/brew ] && ! command -v brew &>/dev/null; then
+  echo "Installing Homebrew (for Graphite CLI)..."
+  sudo apt-get install -y procps file git
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+fi
+[ -x /home/linuxbrew/.linuxbrew/bin/brew ] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+
 # --- Docker ---
 
 sudo systemctl enable docker

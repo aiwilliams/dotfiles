@@ -34,9 +34,25 @@ else
 fi
 
 # Graphite (stacked PRs)
+#
+# Installed via Homebrew, not pnpm: the brew formula ships a standalone prebuilt
+# gt binary (gt-macos-* / gt-linux), so it doesn't depend on any project's Node
+# version. Works on macOS and Linux (Homebrew on Linux, set up in
+# install-ubuntu.sh). brew is installed in a separate step, so ensure it's on
+# PATH here before use.
+if ! command -v brew &>/dev/null; then
+  for brew_bin in /home/linuxbrew/.linuxbrew/bin/brew "$HOME/.linuxbrew/bin/brew" /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    [[ -x "$brew_bin" ]] && eval "$("$brew_bin" shellenv)" && break
+  done
+fi
+
 if ! command -v gt &>/dev/null; then
   echo "Installing Graphite..."
-  pnpm add -g @withgraphite/graphite-cli@stable
+  if ! command -v brew &>/dev/null; then
+    echo "Error: Homebrew not found; cannot install Graphite (gt)." >&2
+    return 1
+  fi
+  brew install withgraphite/tap/graphite
 else
   echo "Graphite already installed, skipping."
 fi
