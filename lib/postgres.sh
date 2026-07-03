@@ -4,7 +4,7 @@
 
 PG_PORT=5432
 PG_SUPERUSER=postgres
-DB_PREFIXES=(platform vector)
+DB_PREFIXES=(platform)
 
 # --------------------------------------------------------------------------
 # Low-level helpers
@@ -190,7 +190,7 @@ pg_drop_worktree_dbs() {
 
 pg_list_worktree_dbs() {
   echo "Worktree databases:"
-  pg_exec "SELECT datname FROM pg_database WHERE datname LIKE 'platform_%' OR datname LIKE 'vector_%' ORDER BY datname;"
+  pg_exec "SELECT datname FROM pg_database WHERE datname LIKE 'platform_%' ORDER BY datname;"
 }
 
 pg_status_worktree_dbs() {
@@ -366,21 +366,17 @@ pg_generate_env_urls() {
   sanitized=$(pg_sanitize_branch_name "$branch")
   local user="$sanitized"
 
+  # Main DB is emitted as component parts only (no explicit URL vars). The
+  # platform config derives POSTGRES_URL / prisma / non-pooling from these
+  # components, and that derive resolver only runs when no explicit URL is
+  # supplied — the integration harness needs it to substitute a per-run clone's
+  # database name. Pinning explicit URLs here would suppress the resolver and
+  # break DB cloning.
   cat <<EOF
-POSTGRES_URL="postgresql://${user}:${user}@localhost:${PG_PORT}/platform_${sanitized}"
-POSTGRES_PRISMA_URL="postgresql://${user}:${user}@localhost:${PG_PORT}/platform_${sanitized}?connect_timeout=15&connection_limit=10"
-POSTGRES_URL_NON_POOLING="postgresql://${user}:${user}@localhost:${PG_PORT}/platform_${sanitized}"
 POSTGRES_USER="${user}"
-POSTGRES_HOST="postgresql://${user}:${user}@localhost:${PG_PORT}"
+POSTGRES_HOST="localhost"
+POSTGRES_PORT="${PG_PORT}"
 POSTGRES_PASSWORD="${user}"
 POSTGRES_DATABASE="platform_${sanitized}"
-
-POSTGRES_VECTOR_URL="postgresql://${user}:${user}@localhost:${PG_PORT}/vector_${sanitized}"
-POSTGRES_VECTOR_PRISMA_URL="postgresql://${user}:${user}@localhost:${PG_PORT}/vector_${sanitized}?connect_timeout=15&connection_limit=10"
-POSTGRES_VECTOR_URL_NON_POOLING="postgresql://${user}:${user}@localhost:${PG_PORT}/vector_${sanitized}"
-POSTGRES_VECTOR_USER="${user}"
-POSTGRES_VECTOR_HOST="postgresql://${user}:${user}@localhost:${PG_PORT}"
-POSTGRES_VECTOR_PASSWORD="${user}"
-POSTGRES_VECTOR_DATABASE="vector_${sanitized}"
 EOF
 }
