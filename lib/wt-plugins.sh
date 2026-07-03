@@ -21,7 +21,7 @@
 #
 # .wtrc variables (shell-sourceable, committed to repo root):
 #   WT_PLUGINS=(postgres clickhouse)           — active plugins (required)
-#   WT_POSTGRES_DB_PREFIXES=(platform vector)  — Postgres DB prefixes per worktree
+#   WT_POSTGRES_DB_PREFIXES=(platform)         — Postgres DB prefixes per worktree
 #   WT_CLICKHOUSE_DB_PREFIXES=(analytics)      — ClickHouse DB prefixes per worktree
 #   WT_POST_CREATE="<cmd>"                     — run after DBs cloned & .env written
 #                                                (fires on wt create and wt db-init)

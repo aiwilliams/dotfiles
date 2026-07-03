@@ -5,7 +5,6 @@
 #   pg [options] [sql]
 #
 # Options:
-#   -d <name>    Database: platform (default) or vector
 #   -e <path>    Path to .env file
 #   -f <file>    Execute SQL from file
 #
@@ -16,7 +15,6 @@
 #
 # Examples:
 #   pg "SELECT * FROM users LIMIT 5"
-#   pg -d vector "SELECT 1"
 #   pg                              Open interactive psql session
 #   pg -f schema.sql                Execute SQL from file
 #   echo "SELECT 1" | pg            Pipe SQL via stdin
@@ -30,7 +28,6 @@ Usage: pg [options] [sql]
 Execute PostgreSQL queries using connection info from .env files.
 
 Options:
-  -d <name>    Database: platform (default) or vector
   -e <path>    Path to .env file
   -f <file>    Execute SQL from file
   -h           Show this help
@@ -42,7 +39,6 @@ Options:
 
 Examples:
   pg "SELECT * FROM users LIMIT 5"
-  pg -d vector "SELECT 1"
   pg                              Open interactive psql session
   pg -f schema.sql                Execute SQL from file
   echo "SELECT 1" | pg            Pipe SQL via stdin
@@ -50,13 +46,11 @@ EOF
   exit 0
 }
 
-db_prefix="platform"
 env_file=""
 sql_file=""
 
-while getopts "d:e:f:h" opt; do
+while getopts "e:f:h" opt; do
   case "$opt" in
-    d) db_prefix="$OPTARG" ;;
     e) env_file="$OPTARG" ;;
     f) sql_file="$OPTARG" ;;
     h) usage ;;
@@ -102,16 +96,41 @@ find_env_file
 
 # --- Extract connection URL ---
 
-if [[ "$db_prefix" == "vector" ]]; then
-  url_var="POSTGRES_VECTOR_URL"
-else
-  url_var="POSTGRES_URL"
-fi
+# Read a single VAR="value" from the env file, stripping quotes. Returns an
+# empty string (not a failure) when the var is absent, so callers under
+# `set -e`/`pipefail` can probe for optional vars.
+read_env_var() {
+  local var="$1"
+  grep "^${var}=" "$env_file" | head -1 | sed "s/^${var}=//" | tr -d '"' | tr -d "'" || true
+}
 
-url=$(grep "^${url_var}=" "$env_file" | head -1 | sed "s/^${url_var}=//" | tr -d '"' | tr -d "'")
+# Prefer an explicit POSTGRES_URL if present; otherwise reconstruct one from the
+# component parts (USER/PASSWORD/HOST/PORT/DATABASE). The main block no longer
+# emits POSTGRES_URL — it is component-only so the app can derive it — so
+# reconstruction is the normal path.
+url=$(read_env_var "POSTGRES_URL")
 
 if [[ -z "$url" ]]; then
-  echo "Error: $url_var not found in $env_file" >&2
+  user=$(read_env_var "POSTGRES_USER")
+  password=$(read_env_var "POSTGRES_PASSWORD")
+  host=$(read_env_var "POSTGRES_HOST")
+  port=$(read_env_var "POSTGRES_PORT")
+  database=$(read_env_var "POSTGRES_DATABASE")
+
+  if [[ -n "$user" && -n "$host" && -n "$database" ]]; then
+    auth="$user"
+    [[ -n "$password" ]] && auth="${user}:${password}"
+    if [[ -n "$port" ]]; then
+      url="postgresql://${auth}@${host}:${port}/${database}"
+    else
+      url="postgresql://${auth}@${host}/${database}"
+    fi
+  fi
+fi
+
+if [[ -z "$url" ]]; then
+  echo "Error: could not resolve a connection URL in $env_file" >&2
+  echo "  Looked for POSTGRES_URL, or POSTGRES_{USER,PASSWORD,HOST,PORT,DATABASE}." >&2
   exit 1
 fi
 

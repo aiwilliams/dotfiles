@@ -714,7 +714,7 @@ PLUGINS
   plugins in a .wtrc file in the main worktree root (shell-sourceable):
 
     WT_PLUGINS=(postgres clickhouse)
-    WT_POSTGRES_DB_PREFIXES=(platform vector)
+    WT_POSTGRES_DB_PREFIXES=(platform)
     WT_CLICKHOUSE_DB_PREFIXES=(analytics)
 
   Without a .wtrc, no plugins are loaded and no databases are managed.
