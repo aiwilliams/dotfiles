@@ -56,6 +56,13 @@ psql -U postgres -c "ALTER USER postgres PASSWORD 'postgres';" 2>/dev/null || \
   createuser -s postgres 2>/dev/null && \
   psql -U postgres -c "ALTER USER postgres PASSWORD 'postgres';"
 
+# Run PostgreSQL in UTC regardless of host timezone. GUC-based (not a
+# postgresql.conf edit) so it applies via reload, no restart needed.
+echo "Configuring PostgreSQL timezone (UTC)..."
+psql -U postgres -c "ALTER SYSTEM SET timezone TO 'UTC';" > /dev/null
+psql -U postgres -c "ALTER SYSTEM SET log_timezone TO 'UTC';" > /dev/null
+psql -U postgres -c "SELECT pg_reload_conf();" > /dev/null
+
 # Create main worktree databases
 source "$SCRIPT_DIR/lib/postgres.sh"
 pg_create_worktree_dbs "main"

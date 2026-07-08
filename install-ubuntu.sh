@@ -395,6 +395,13 @@ if [[ "$CURRENT_AUTH" != "t" ]]; then
   sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
 fi
 
+# Run PostgreSQL in UTC regardless of host timezone. GUC-based (not a
+# postgresql.conf edit) so it applies via reload, no restart needed.
+echo "Configuring PostgreSQL timezone (UTC)..."
+sudo -u postgres psql -c "ALTER SYSTEM SET timezone TO 'UTC';" > /dev/null
+sudo -u postgres psql -c "ALTER SYSTEM SET log_timezone TO 'UTC';" > /dev/null
+sudo -u postgres psql -c "SELECT pg_reload_conf();" > /dev/null
+
 # Configure pg_hba.conf to use password auth for local TCP connections
 if sudo grep -qE '^\s*(local|host)\s+all\s+all\s.*(peer|ident|scram-sha-256)' "$PG_HBA"; then
   echo "Configuring pg_hba.conf for md5 auth..."
