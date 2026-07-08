@@ -462,6 +462,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=TZ=UTC
 ExecStart=${CH_BIN} server -- --path=${CH_DATA}/
 WorkingDirectory=${CH_DATA}
 Restart=on-failure

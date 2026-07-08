@@ -85,6 +85,11 @@ cat > "$CH_PLIST" <<PLIST
     </array>
     <key>WorkingDirectory</key>
     <string>${CH_DATA}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TZ</key>
+        <string>UTC</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
