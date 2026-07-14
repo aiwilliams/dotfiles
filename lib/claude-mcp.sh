@@ -32,8 +32,13 @@ else
   echo "Skipping Context7 MCP: set CONTEXT7_API_KEY to enable."
 fi
 
-# Database access via dbhub (config file managed by wt agent-env)
-mcp_add dbhub --scope user --transport stdio dbhub -- pnpm dlx @bytebase/dbhub --transport stdio --config "$HOME/projects/private/dbhub.private.toml"
+# Database access via dbhub (config file managed by wt agent-env).
+# TZ=UTC: node-postgres materializes `timestamp without time zone` columns in the
+# process's local zone, so a non-UTC host (e.g. EDT) renders those naive columns
+# shifted by its offset. Pinning the dbhub process to UTC makes it read them as the
+# UTC wall-clock they were written as. (--env before `--`: the flag is variadic and
+# would otherwise swallow the `dbhub` name positional.)
+mcp_add dbhub --scope user --transport stdio dbhub --env TZ=UTC -- pnpm dlx @bytebase/dbhub --transport stdio --config "$HOME/projects/private/dbhub.private.toml"
 
 # ClickHouse — one user-scoped server that adapts per worktree. The per-worktree
 # database (and any host overrides) arrive via mise-injected .env.agent, which wt
