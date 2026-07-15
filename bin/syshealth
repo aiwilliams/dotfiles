@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# syshealth — Quick system health overview focused on memory, OOM, and network.
+# syshealth — Quick system health overview focused on memory, OOM, tmpfs, and network.
 #
 # Usage:
 #   syshealth                 Full status report
@@ -30,6 +30,7 @@ bell() { printf '\a'; }
 MEM_WARN_PCT=25      # warn when available memory drops below this % of total
 SLICE_WARN_PCT=75    # warn when Docker slice usage exceeds this % of its limit
 INOTIFY_WARN_PCT=80  # warn when inotify watches/instances exceed this % of limit
+TMPFS_WARN_PCT=80    # warn when any tmpfs (esp. /tmp) inode OR byte usage exceeds this %
 
 OS="$(uname -s)"   # Linux | Darwin
 
@@ -135,6 +136,21 @@ collect_alerts() {
       fi
     fi
   fi
+
+  # tmpfs inode / byte exhaustion — a full tmpfs (especially /tmp under the
+  # Node/tsx/pnpm churn) fails every mkdir/open with a misleading ENOSPC while
+  # the other dimension, and `df -h`, still look empty. Warn on whichever of
+  # inodes/bytes is nearer the wall. (No OS guard needed: tmpfs_usage is empty
+  # on macOS, so the loop simply doesn't run.)
+  while read -r tgt bpct ipct; do
+    [ -z "$tgt" ] && continue
+    worst=$bpct; dim=bytes
+    if [ "${ipct:-0}" -gt "${worst:-0}" ] 2>/dev/null; then worst=$ipct; dim=inodes; fi
+    if [ "${worst:-0}" -ge "$TMPFS_WARN_PCT" ] 2>/dev/null; then
+      alerts+=("$(printf "${red}tmpfs %s: %d%% %s used (inodes %d%%, bytes %d%%)${reset}" \
+        "$tgt" "$worst" "$dim" "$ipct" "$bpct")")
+    fi
+  done < <(tmpfs_usage)
 
   # Docker slice / earlyoom / kernel OOM are systemd + cgroup + journald
   # concepts with no macOS analogue; skip them rather than emit false alarms.
@@ -300,6 +316,24 @@ inotify_top() {
     c=$(digits_or_zero "$c")
     [ "$c" -gt 0 ] 2>/dev/null && printf '%s %s\n' "$c" "$pid"
   done | sort -rn | head -6
+}
+
+# --- tmpfs inode / byte exhaustion ---
+#
+# A tmpfs enforces BOTH a byte limit and an inode (file-count) cap, and hitting
+# EITHER one fails every mkdir/open beneath it with ENOSPC — the same misleading
+# errno as inotify exhaustion above, and just as invisible to `df -h`. The
+# incident that motivated the /tmp cleanup policy (see install-ubuntu.sh) was
+# /tmp at 100% inodes while bytes sat at 11%: a million tiny tsx/node/pnpm cache
+# files. So we watch whichever dimension is closer to its wall, per mount.
+#
+# GNU df --output reports both used% columns in one call; -t tmpfs restricts to
+# the in-RAM filesystems (empty on macOS, where the flags are unsupported and
+# tmpfs inode caps don't apply, so callers self-skip). Read-only systemd
+# credential mounts can't fill from user activity, so they're dropped for legibility.
+tmpfs_usage() {
+  df --output=target,pcent,ipcent -t tmpfs 2>/dev/null \
+    | awk 'NR>1 && $1 !~ "^/run/credentials/" { gsub(/%/,""); print $1, $2+0, $3+0 }'
 }
 
 # --- OOM forensics (Linux) ---
@@ -629,6 +663,32 @@ full_report() {
     fi
   else
     printf "  ${yellow}not available on this platform${reset}\n"
+  fi
+
+  # --- tmpfs (inodes + bytes) ---
+  # Same ENOSPC failure class as inotify above: a tmpfs caps both bytes AND
+  # inodes, and exhausting either breaks every mkdir/open beneath it while the
+  # other dimension — and `df -h` — still look healthy. Inodes first: that's the
+  # one that bit /tmp (100% inodes at 11% bytes) and the reason for the hourly
+  # cleanup timer, whose liveness we also surface here.
+  section "tmpfs"
+  if [ "$OS" != Linux ]; then
+    printf "  ${yellow}not available on this platform${reset}\n"
+  else
+    printf "  ${bold}%-16s %7s %7s${reset}\n" "mount" "inodes" "bytes"
+    tmpfs_usage | while read -r tgt bpct ipct; do
+      [ -z "$tgt" ] && continue
+      hi=$bpct; [ "${ipct:-0}" -gt "$hi" ] 2>/dev/null && hi=$ipct
+      col="${green}"
+      [ "${hi:-0}" -ge $(( TMPFS_WARN_PCT - 20 )) ] 2>/dev/null && col="${yellow}"
+      [ "${hi:-0}" -ge "$TMPFS_WARN_PCT" ]        2>/dev/null && col="${red}"
+      printf "  ${col}%-16s %6d%% %6d%%${reset}\n" "$tgt" "$ipct" "$bpct"
+    done
+    if systemctl list-unit-files systemd-tmpfiles-clean.timer &>/dev/null; then
+      tstate=$(systemctl is-active systemd-tmpfiles-clean.timer 2>/dev/null)
+      [ "$tstate" = active ] && tcol="${green}" || tcol="${red}"
+      printf "  cleanup timer: ${tcol}%s${reset} (hourly reaper that keeps /tmp bounded)\n" "$tstate"
+    fi
   fi
 
   # --- Docker slice ---
