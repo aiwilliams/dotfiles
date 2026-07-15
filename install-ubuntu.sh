@@ -264,6 +264,69 @@ if [ ! -f "$SYSCTL_MEMORY" ] || ! diff -q <(echo "$SYSCTL_MEMORY_DESIRED") "$SYS
   sudo sysctl --system
 fi
 
+# --- /tmp inode-exhaustion prevention ---
+#
+# /tmp is a 31G tmpfs capped at 1,048,576 inodes. A heavy Node/tsx/pnpm + multi-agent
+# workload churns ~250k tiny files/day into /tmp (tsx and node compile caches, pnpm
+# spillover, and orphaned tmp-<pid> build dirs left behind when OOM-killed processes
+# skip their cleanup). The distro default (/usr/lib/tmpfiles.d/tmp.conf) only reaps
+# /tmp entries older than 10 days — far longer than this churn can survive within the
+# inode cap — so /tmp hits 100% inodes (ENOSPC for every mkdir/open) while byte usage
+# sits near 10%. Two changes fix it: shorter per-cache age thresholds, and running the
+# reaper hourly instead of daily.
+#
+# Aging uses the default clock (atime + ctime + mtime must ALL be older than the age),
+# so files a tool is actively reading/writing are never removed — worst case is a cache
+# miss + rebuild. Live Claude Code session scratchpads keep fresh mtimes, so the 2-day
+# base age never touches an active session; only stale (>2d idle) session dirs age out.
+# ("Shorter age wins" for overlapping rules and the tmp-* glob match were both verified
+#  on this host with `systemd-tmpfiles --clean --dry-run`.)
+#
+# Shadowing tmp.conf by basename is the distro-sanctioned override path — the stock file
+# comments that the /tmp rules are split out "to make them easier to override". This only
+# replaces the two base `q` rules; the exclusions that protect running services' private
+# /tmp mounts and other live sockets live in SEPARATE files (systemd-tmp.conf, snapd.conf,
+# tmux.conf, openssh-client.conf), which are left untouched and stay active. Verified with
+# a merged-set `--clean --dry-run`: systemd-private-*, snap-private-tmp, tmux-*, ssh-*, and
+# the X11/ICE socket dirs are all spared (a single-file dry-run misleadingly flags them,
+# because passing one file skips every other config's exclusion rules).
+
+TMPFILES_TMP="/etc/tmpfiles.d/tmp.conf"
+TMPFILES_TMP_DESIRED='# Managed by dotfiles install-ubuntu.sh. Overrides /usr/lib/tmpfiles.d/tmp.conf.
+# Prevents /tmp tmpfs inode exhaustion under heavy Node/tsx/pnpm + multi-agent load.
+# Aging = default clock (atime+ctime+mtime all older than age); in-use files are spared.
+
+# Base: reap idle /tmp entries after 2 days (safe margin for live Claude Code sessions).
+q /tmp 1777 root root 2d
+
+# High-churn regenerable caches: reap after 12h idle (shorter age overrides the 2d base).
+e /tmp/tsx-1000           - - - 12h
+e /tmp/node-compile-cache - - - 12h
+e /tmp/.pnpm-store        - - - 12h
+
+# Orphaned build/temp dirs from dead (often OOM-killed) processes: reap files after 6h.
+e /tmp/tmp-*              - - - 6h
+
+# /var/tmp: unchanged from distro default.
+q /var/tmp 1777 root root 30d'
+if [ ! -f "$TMPFILES_TMP" ] || ! diff -q <(echo "$TMPFILES_TMP_DESIRED") "$TMPFILES_TMP" &>/dev/null; then
+  echo "Installing /tmp inode-cleanup policy ($TMPFILES_TMP)..."
+  echo "$TMPFILES_TMP_DESIRED" | sudo tee "$TMPFILES_TMP" > /dev/null
+fi
+
+# Run the reaper hourly instead of the distro default of daily.
+TMPFILES_TIMER_DIR="/etc/systemd/system/systemd-tmpfiles-clean.timer.d"
+TMPFILES_TIMER_OVERRIDE="$TMPFILES_TIMER_DIR/frequent.conf"
+TMPFILES_TIMER_DESIRED='[Timer]
+OnUnitActiveSec=1h'
+if [ ! -f "$TMPFILES_TIMER_OVERRIDE" ] || ! diff -q <(echo "$TMPFILES_TIMER_DESIRED") "$TMPFILES_TIMER_OVERRIDE" &>/dev/null; then
+  echo "Setting systemd-tmpfiles cleanup to run hourly..."
+  sudo mkdir -p "$TMPFILES_TIMER_DIR"
+  echo "$TMPFILES_TIMER_DESIRED" | sudo tee "$TMPFILES_TIMER_OVERRIDE" > /dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl restart systemd-tmpfiles-clean.timer
+fi
+
 # --- Network resilience (keep machine accessible remotely) ---
 
 # Make NetworkManager retry DHCP forever instead of giving up after 4 attempts
