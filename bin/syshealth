@@ -10,9 +10,6 @@
 #   syshealth oom-record [s]  Sample per-scope mem/swap to a CSV every [s]s
 #                             (default 10); on a fresh oomd/kernel kill, bell
 #                             and dump the samples leading up to it
-#   syshealth nx              Nx daemon/scope view: whether each daemon is
-#                             confined to its scope-nx-* scope, per-scope
-#                             mem/swap, and how to reset a runaway (see `nxs`)
 #   (Use `wt ps` for next-server / inngest / database process info)
 
 set -euo pipefail
@@ -378,13 +375,6 @@ oom_app_scopes() {
 # Bytes -> "N.NG" for compact columns.
 oom_gb() { awk "BEGIN{printf \"%.1fG\", ${1:-0}/1073741824}"; }
 
-# Leaf cgroup unit a pid lives in (cgroup v2 single line: "0::/.../<leaf>"),
-# empty on failure. Used to tell whether an nx daemon is confined to a
-# scope-nx-* scope or has leaked into a claude/session scope.
-pid_cgroup_leaf() {
-  awk -F: 'NR==1{n=split($3,a,"/"); print a[n]}' "/proc/$1/cgroup" 2>/dev/null || true
-}
-
 # Shorten an oomd/kernel kill line by stripping the long per-user cgroup
 # prefix so the surviving "app.slice/scope-claude-NNN.scope" is legible.
 oom_shorten() { sed 's#/user\.slice/user-[0-9]*\.slice/user@[0-9]*\.service/##g'; }
@@ -453,73 +443,6 @@ oom_detail() {
   [ "$found" -eq 0 ] && printf "  ${green}none in last 24h${reset}\n"
 
   printf "\n  ${bold}capture the growth curve to a file:${reset} syshealth oom-record [interval_s]\n"
-}
-
-# --- Nx scope management (Linux) ---
-#
-# `nxs` runs nx work in a per-workspace scope-nx-<ws>-PID.scope so the daemon
-# (which can balloon to tens of GB in a big monorepo) is confined and killable
-# without touching the claude scope that launched it. This view answers the two
-# questions that matter: is each daemon actually confined, and how heavy are the
-# nx scopes right now — plus the commands to reset a runaway.
-nx_detail() {
-  if [ "$OS" != Linux ]; then
-    printf "${yellow}nx detail is Linux-only${reset}\n"
-    return 0
-  fi
-
-  section "Nx daemons"
-  local pid leaf cwd rss vsz col state found=0
-  while read -r pid; do
-    [ -z "$pid" ] && continue
-    found=1
-    leaf=$(pid_cgroup_leaf "$pid")
-    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
-    rss=$(awk '/VmRSS/{printf "%.1f", $2/1048576}' "/proc/$pid/status" 2>/dev/null || echo "?")
-    vsz=$(awk '/VmSize/{printf "%.0f", $2/1048576}' "/proc/$pid/status" 2>/dev/null || echo "?")
-    case "$leaf" in
-      scope-nx-*) col="${green}"; state="confined  " ;;
-      *)          col="${red}";   state="UNCONFINED" ;;
-    esac
-    printf "  ${col}%s${reset}  pid %-7s  rss %sG  vsz %sG\n" "$state" "$pid" "$rss" "$vsz"
-    printf "              ${col}%s${reset}\n" "${leaf:-?}"
-    printf "              %s\n" "$cwd"
-    if [ "$state" = "UNCONFINED" ]; then
-      printf "              ${yellow}→ leaked into a non-nx scope. Reclaim with:${reset} ${bold}(cd %s && nx reset)${reset}${yellow}, then drive nx via ${bold}nxs${reset}\n" "$cwd"
-    fi
-  done < <(pgrep -f 'nx/dist/src/daemon/server/start.js' 2>/dev/null || true)
-  [ "$found" -eq 0 ] && printf "  ${green}no nx daemon running${reset}\n"
-
-  section "Nx scopes (swap, then memory)"
-  local base d unit cur peak sw swpk any=0
-  base=$(oom_app_slice)
-  if [ -d "$base" ]; then
-    printf "  ${bold}%-30s %8s %8s %9s %9s${reset}\n" \
-      "scope" "swap" "mem" "mem-peak" "swp-peak"
-    for d in "$base"/scope-nx-*.scope; do
-      [ -d "$d" ] || continue
-      any=1
-      unit=$(basename "$d")
-      cur=$(cat "$d/memory.current" 2>/dev/null || echo 0)
-      peak=$(cat "$d/memory.peak" 2>/dev/null || echo 0)
-      sw=$(cat "$d/memory.swap.current" 2>/dev/null || echo 0)
-      swpk=$(cat "$d/memory.swap.peak" 2>/dev/null || echo 0)
-      col="${green}"
-      [ "${sw:-0}" -gt 1610612736 ] 2>/dev/null && col="${yellow}"
-      printf "  ${col}%-30s${reset} %8s %8s %9s %9s\n" \
-        "${unit%.scope}" \
-        "$(oom_gb "$sw")" "$(oom_gb "$cur")" "$(oom_gb "$peak")" "$(oom_gb "$swpk")"
-    done
-  fi
-  [ "$any" -eq 0 ] && printf "  ${yellow}no scope-nx-* scopes — nothing launched via nxs yet${reset}\n"
-
-  section "Manage"
-  printf "  confine nx work:        ${bold}nxs pnpm test${reset} · ${bold}nxs pnpm dev${reset} · ${bold}nxs pnpm nx run <target>${reset}\n"
-  printf "  reset a workspace daemon: ${bold}(cd <worktree> && nx reset)${reset}\n"
-  printf "  kill a runaway scope:   ${bold}systemctl --user stop <scope-nx-...>.scope${reset}\n"
-  printf "  list nx scopes:         ${bold}systemctl --user list-units 'scope-nx-*'${reset}\n"
-  printf "  caps: MemoryHigh=%s MemoryMax=%s MemorySwapMax=%s (env NXS_HIGH/NXS_MAX/NXS_SWAP_MAX)\n" \
-    "${NXS_HIGH:-16G}" "${NXS_MAX:-24G}" "${NXS_SWAP_MAX:-2G}"
 }
 
 # Background sampler: append per-scope mem/swap to a CSV ring buffer so a
@@ -899,6 +822,5 @@ case "${1:-}" in
   watch)      watch_mode "${2:-60}" ;;
   oom)        oom_detail ;;
   oom-record) oom_record "${2:-10}" ;;
-  nx)         nx_detail ;;
   *)          full_report ;;
 esac
