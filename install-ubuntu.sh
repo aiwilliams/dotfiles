@@ -537,6 +537,17 @@ ExecStart=${CH_BIN} server -- --path=${CH_DATA}/
 WorkingDirectory=${CH_DATA}
 Restart=on-failure
 
+# Never let ClickHouse take down the box: uncapped, it peaked at 51.6G mem
+# + 10.6G swap (2026-07-16) and helped drive system swap to 99.8%, where
+# systemd-oomd kills the swap-heaviest scopes (a claude session died first).
+# ClickHouse reads the cgroup limit to size max_server_memory_usage, so big
+# queries fail with MEMORY_LIMIT_EXCEEDED instead of the kernel OOM-killing
+# the server. MemoryHigh throttles/reclaims before the hard cap bites;
+# MemorySwapMax keeps it from dominating swap and tripping oomd again.
+MemoryHigh=20G
+MemoryMax=24G
+MemorySwapMax=4G
+
 [Install]
 WantedBy=default.target
 UNIT
