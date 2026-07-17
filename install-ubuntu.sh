@@ -127,24 +127,28 @@ if [ ! -f "$SSHD_OVERRIDE" ] || ! diff -q <(echo "$SSHD_OVERRIDE_DESIRED") "$SSH
   sudo systemctl daemon-reload
 fi
 
-# Two-layer OOM defense:
-#   1. systemd-oomd (primary): PSI-aware, only acts on sustained pressure (~20s),
-#      kills the worst single user-session cgroup. Handles routine memory spikes
-#      (overlapping type-check + lint + dev-server) gracefully.
-#   2. earlyoom (catastrophe fallback): only fires when memory + swap are both
-#      near-zero — basically a last-ditch panic button before the kernel OOM
-#      killer. tailscaled and sshd have OOMScoreAdjust=-900 so the kernel
-#      backstop won't take them either.
+# Two-layer OOM defense, split by kill granularity:
+#   1. systemd-oomd (pressure only): PSI-aware, acts on sustained pressure
+#      (~20s), kills the worst whole cgroup under user@.service. Handles
+#      routine reclaim storms (overlapping type-check + lint + dev-server).
+#      Deliberately NOT used for swap exhaustion — see the user.slice note
+#      below: its swap path cannot be made to spare claude session scopes.
+#   2. earlyoom + kernel OOM killer (memory/swap exhaustion): per-PROCESS
+#      killers, so they take the fattest process (a test runner, a
+#      next-server) rather than a whole session cgroup — an orchestrating
+#      claude session survives its expendable children. earlyoom --avoid
+#      spares claude/postgres/etc by name; tailscaled and sshd have
+#      OOMScoreAdjust=-900 so the kernel backstop won't take them either.
 
 # Layer 1: systemd-oomd PSI-based monitoring.
 # 80% sustained pressure for 20s before acting. The earlier 60% (and the
 # distro's 50% on user@.service, see below) fired on transient swap-thrash
 # spikes during ordinary builds while tens of GB of RAM were still available —
 # a pressure stall is not the same as memory exhaustion. earlyoom + the kernel
-# remain the real out-of-memory backstops.
+# remain the real out-of-memory backstops. (No SwapUsedLimit tuning: nothing
+# sets ManagedOOMSwap=kill anymore, so oomd's swap killer is entirely off.)
 OOMD_CONF="/etc/systemd/oomd.conf.d/00-tuning.conf"
 OOMD_CONF_DESIRED="[OOM]
-SwapUsedLimit=95%
 DefaultMemoryPressureLimit=80%
 DefaultMemoryPressureDurationSec=20s"
 if [ ! -f "$OOMD_CONF" ] || ! diff -q <(echo "$OOMD_CONF_DESIRED") "$OOMD_CONF" &>/dev/null; then
@@ -169,16 +173,26 @@ if [ ! -f "$USER_SERVICE_OOMD" ] || ! diff -q <(echo "$USER_SERVICE_OOMD_DESIRED
   sudo systemctl daemon-reload
 fi
 
-# Opt user.slice into oomd management. Without this, oomd does nothing — the
-# default ManagedOOM* settings on user.slice are "auto" which is effectively off.
+# user.slice is deliberately NOT opted into oomd management. An earlier
+# revision set ManagedOOMMemoryPressure=kill + ManagedOOMSwap=kill here, but
+# per systemd.resource-control(5) both monitors on the root-owned /user.slice
+# ignore ManagedOOMPreference xattrs on user-owned cgroups: the swap path
+# honors them ONLY on root-owned cgroups (no exceptions), and the pressure
+# path only when the candidate's owner matches the monitored cgroup's owner.
+# Result: claude scopes marked omit were killed anyway once they held the
+# most swap (2026-07-17 00:57, scope-claude-1130049, 13.5G swapped).
+#
+# Pressure kills still work via the distro's ManagedOOMMemoryPressure=kill on
+# user@.service (10-oomd-user-service-defaults.conf, limit raised to 80%
+# above): each per-uid user@.service instance owns its cgroup with the same
+# uid as its descendants, so omit IS honored on that path. Swap exhaustion is ceded to earlyoom + the
+# kernel OOM killer, which kill per-process — the fat child dies, not the
+# orchestrating session that spawned it.
 USER_SLICE_OOMD="/etc/systemd/system/user.slice.d/00-oomd.conf"
-USER_SLICE_OOMD_DESIRED="[Slice]
-ManagedOOMMemoryPressure=kill
-ManagedOOMSwap=kill"
-if [ ! -f "$USER_SLICE_OOMD" ] || ! diff -q <(echo "$USER_SLICE_OOMD_DESIRED") "$USER_SLICE_OOMD" &>/dev/null; then
-  echo "Enabling oomd management on user.slice..."
-  sudo mkdir -p /etc/systemd/system/user.slice.d
-  echo "$USER_SLICE_OOMD_DESIRED" | sudo tee "$USER_SLICE_OOMD" > /dev/null
+if [ -f "$USER_SLICE_OOMD" ]; then
+  echo "Removing oomd kill management from user.slice (swap kills ignore user-owned omit xattrs)..."
+  sudo rm "$USER_SLICE_OOMD"
+  sudo rmdir --ignore-fail-on-non-empty /etc/systemd/system/user.slice.d
   sudo systemctl daemon-reload
 fi
 
@@ -224,6 +238,42 @@ fi
 
 sudo systemctl enable earlyoom
 sudo systemctl restart earlyoom
+
+# --- Memory forensics sampler (syshealth memsnap) ---
+#
+# Neither OOM killer keeps pre-kill history: oomd logs only the victim and an
+# aggregate %, and the kernel logs a point-in-time process dump. This timer
+# appends one CSV row per user cgroup (claude scopes, clickhouse, dev-server
+# scopes, login sessions) plus a _system row every minute — a few ms of
+# cgroupfs reads, self-bounded to ~2 weeks — so `syshealth mem` can replay
+# who was growing in the hours before any kill. User units, no sudo needed.
+MEMSNAP_UNIT_DIR="$HOME/.config/systemd/user"
+mkdir -p "$MEMSNAP_UNIT_DIR"
+
+cat > "$MEMSNAP_UNIT_DIR/syshealth-memsnap.service" <<'UNIT'
+[Unit]
+Description=Sample per-cgroup memory/swap for syshealth mem
+
+[Service]
+Type=oneshot
+ExecStart=%h/dotfiles/bin/syshealth mem-sample
+UNIT
+
+cat > "$MEMSNAP_UNIT_DIR/syshealth-memsnap.timer" <<'UNIT'
+[Unit]
+Description=Run syshealth mem-sample every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl --user daemon-reload
+systemctl --user enable --now syshealth-memsnap.timer
 
 # --- Kernel tuning ---
 

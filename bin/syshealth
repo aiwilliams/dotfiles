@@ -10,6 +10,12 @@
 #   syshealth oom-record [s]  Sample per-scope mem/swap to a CSV every [s]s
 #                             (default 10); on a fresh oomd/kernel kill, bell
 #                             and dump the samples leading up to it
+#   syshealth mem [hours]     Replay memsnap history (default 6h): per-unit
+#                             current + peak mem/swap with peak timestamps —
+#                             answers "what was consuming before that kill?"
+#   syshealth mem-sample      Append one sample row per user cgroup to the
+#                             memsnap CSV. Run by syshealth-memsnap.timer
+#                             every minute; a few ms of cgroupfs reads.
 #   (Use `wt ps` for next-server / inngest / database process info)
 
 set -euo pipefail
@@ -403,9 +409,12 @@ oom_detail() {
   else
     printf "  ${yellow}oomctl not available${reset}\n"
   fi
-  printf "  ${yellow}rule:${reset} when system swap exceeds the limit, oomd kills the\n"
-  printf "  user.slice descendant holding the most swap. Bounding per-scope swap\n"
-  printf "  keeps any one session from becoming that victim.\n"
+  printf "  ${yellow}rule:${reset} oomd only pressure-kills, per-user via user@.service, where\n"
+  printf "  ManagedOOMPreference=omit on claude scopes IS honored (same-uid rule).\n"
+  printf "  Its swap killer is off — user.slice swap kills ignored omit on\n"
+  printf "  user-owned cgroups and took out claude sessions. Swap exhaustion now\n"
+  printf "  falls to earlyoom + kernel OOM, which kill per-process (fat child\n"
+  printf "  dies, orchestrating session survives).\n"
 
   section "Heaviest user scopes (swap, then memory)"
   if [ -d "$(oom_app_slice)" ]; then
@@ -442,7 +451,8 @@ oom_detail() {
   fi
   [ "$found" -eq 0 ] && printf "  ${green}none in last 24h${reset}\n"
 
-  printf "\n  ${bold}capture the growth curve to a file:${reset} syshealth oom-record [interval_s]\n"
+  printf "\n  ${bold}growth history (always-on, 1/min):${reset} syshealth mem [hours]\n"
+  printf "  ${bold}live high-frequency capture:${reset} syshealth oom-record [interval_s]\n"
 }
 
 # Background sampler: append per-scope mem/swap to a CSV ring buffer so a
@@ -492,6 +502,131 @@ oom_record() {
     sleep "$interval"
   done
   rm -f "$seen"
+}
+
+# --- memsnap: continuous low-cost memory history (Linux) ---
+#
+# oom-record above is the interactive, high-frequency version you start by
+# hand when hunting a live problem. memsnap is its always-on sibling: the
+# syshealth-memsnap.timer user unit (installed by install-ubuntu.sh) calls
+# `syshealth mem-sample` every minute, appending one row per user cgroup plus
+# a _system row. Reading a dozen cgroupfs files costs a few ms, so the history
+# is effectively free — and it's the only record of who was growing in the
+# hours before an OOM kill, since neither oomd nor the kernel keeps one.
+
+MEMSNAP_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/syshealth/memsnap.csv"
+MEMSNAP_MAXLINES=400000     # ~9 days at 1 tick/min with ~30 rows per tick
+MEMSNAP_MIN_BYTES=33554432  # skip units under 32M mem AND 32M swap — dozens of
+                            # idle run-*/session scopes would drown the history
+
+mem_sample() {
+  [ "$OS" = Linux ] || return 0
+  mkdir -p "$(dirname "$MEMSNAP_LOG")"
+  [ -s "$MEMSNAP_LOG" ] || printf 'epoch,unit,mem_bytes,swap_bytes,info\n' > "$MEMSNAP_LOG"
+  local ts; ts=$(date +%s)
+  {
+    # _system row: used memory / used swap; info carries the memory PSI
+    # (some avg60) — the signal oomd's pressure path actually acts on.
+    awk -v ts="$ts" '
+      /MemTotal/ {t=$2} /MemAvailable/ {a=$2} /SwapTotal/ {st=$2} /SwapFree/ {sf=$2}
+      END { printf "%s,_system,%d,%d,", ts, (t-a)*1024, (st-sf)*1024 }' /proc/meminfo
+    awk '/^some/ { if (match($0, /avg60=[0-9.]+/)) printf "psi_some_avg60=%s", substr($0, RSTART+6, RLENGTH-6) } END { print "" }' /proc/pressure/memory
+
+    # One row per scope/service under app.slice (claude sessions, clickhouse,
+    # scope-wrapped dev servers) and per SSH login session scope. info = cwd
+    # of the cgroup's first process, tracing it to its worktree.
+    local d unit cur sw firstpid cwd
+    for d in "$(oom_app_slice)"/*.scope "$(oom_app_slice)"/*.service \
+             "/sys/fs/cgroup/user.slice/user-$(id -u).slice"/session-*.scope; do
+      [ -d "$d" ] || continue
+      unit=$(basename "$d")
+      cur=$(cat "$d/memory.current" 2>/dev/null || echo 0)
+      sw=$(cat "$d/memory.swap.current" 2>/dev/null || echo 0)
+      [ "${cur:-0}" -lt "$MEMSNAP_MIN_BYTES" ] 2>/dev/null \
+        && [ "${sw:-0}" -lt "$MEMSNAP_MIN_BYTES" ] 2>/dev/null && continue
+      firstpid=$(head -n1 "$d/cgroup.procs" 2>/dev/null || true)
+      cwd=""
+      [ -n "${firstpid:-}" ] && cwd=$(readlink "/proc/$firstpid/cwd" 2>/dev/null || true)
+      printf '%s,%s,%s,%s,%s\n' "$ts" "$unit" "${cur:-0}" "${sw:-0}" "$cwd"
+    done
+  } >> "$MEMSNAP_LOG"
+
+  # Self-bound the file: trim to the newest half once over the cap.
+  local lines; lines=$(wc -l < "$MEMSNAP_LOG" 2>/dev/null || echo 0)
+  if [ "${lines:-0}" -gt "$MEMSNAP_MAXLINES" ]; then
+    { head -n1 "$MEMSNAP_LOG"; tail -n $(( MEMSNAP_MAXLINES / 2 )) "$MEMSNAP_LOG"; } > "$MEMSNAP_LOG.tmp" \
+      && mv "$MEMSNAP_LOG.tmp" "$MEMSNAP_LOG"
+  fi
+}
+
+mem_report() {
+  if [ "$OS" != Linux ]; then
+    printf "${yellow}mem history is Linux-only${reset}\n"
+    return 0
+  fi
+  local hours="${1:-6}"
+  if [ ! -s "$MEMSNAP_LOG" ]; then
+    printf "${yellow}no samples yet${reset} — expected at %s\n" "$MEMSNAP_LOG"
+    printf "sampler timer: %s (enable with: systemctl --user enable --now syshealth-memsnap.timer)\n" \
+      "$(systemctl --user is-active syshealth-memsnap.timer 2>/dev/null || echo not-installed)"
+    return 0
+  fi
+  section "Memory history (last ${hours}h, peaks with timestamps)"
+  python3 - "$MEMSNAP_LOG" "$hours" <<'PY'
+import sys, time
+
+log, hours = sys.argv[1], float(sys.argv[2])
+cutoff = time.time() - hours * 3600
+units = {}   # unit -> dict(last_ts, last_mem, last_swap, peak_mem, peak_mem_ts, peak_swap, peak_swap_ts, info)
+ticks = set()
+with open(log) as f:
+    next(f, None)  # header
+    for line in f:
+        parts = line.rstrip("\n").split(",", 4)  # info (a cwd) may contain commas
+        if len(parts) < 5:
+            continue
+        try:
+            ts, mem, swap = int(parts[0]), int(parts[2]), int(parts[3])
+        except ValueError:
+            continue
+        if ts < cutoff:
+            continue
+        ticks.add(ts)
+        u = units.setdefault(parts[1], dict(peak_mem=-1, peak_swap=-1))
+        u.update(last_ts=ts, last_mem=mem, last_swap=swap)
+        if parts[4]:
+            u["info"] = parts[4]
+        if mem > u["peak_mem"]:
+            u.update(peak_mem=mem, peak_mem_ts=ts)
+        if swap > u["peak_swap"]:
+            u.update(peak_swap=swap, peak_swap_ts=ts)
+
+if not units:
+    print(f"  no samples in the last {hours:g}h (timer stopped?)")
+    sys.exit(0)
+
+gb = lambda b: f"{b / 2**30:.1f}G"
+hm = lambda ts: time.strftime("%H:%M", time.localtime(ts))
+
+span = (max(ticks) - min(ticks)) / 3600 if len(ticks) > 1 else 0
+print(f"  {len(ticks)} samples spanning {span:.1f}h")
+print(f"  {'unit':<30} {'now':>6} {'peak':>6} {'@':>5}  {'swap':>6} {'swpk':>6} {'@':>5}  info")
+sys_row = units.pop("_system", None)
+rows = sorted(units.items(), key=lambda kv: (kv[1]["peak_swap"], kv[1]["peak_mem"]), reverse=True)
+if sys_row:
+    rows.insert(0, ("_system (used)", sys_row))
+for name, u in rows[:20]:
+    print(f"  {name.removesuffix('.scope'):<30}"
+          f" {gb(u['last_mem']):>6} {gb(u['peak_mem']):>6} {hm(u['peak_mem_ts']):>5} "
+          f" {gb(u['last_swap']):>6} {gb(u['peak_swap']):>6} {hm(u['peak_swap_ts']):>5} "
+          f" {u.get('info', '')}")
+dropped = len(rows) - 20
+if dropped > 0:
+    print(f"  (+{dropped} smaller units not shown)")
+PY
+  printf "\n  sampler timer: %s   log: %s\n" \
+    "$(systemctl --user is-active syshealth-memsnap.timer 2>/dev/null || echo not-installed)" \
+    "$MEMSNAP_LOG"
 }
 
 # --- Watch mode ---
@@ -775,6 +910,7 @@ full_report() {
         journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep "systemd-oomd.*Killed " | tail -5 | sed 's/^/    /'
         printf "  isolate dev servers in their own scope (${bold}scope <cmd>${reset}) so a kill spares the SSH session\n"
         printf "  forensics — policy, heaviest scopes, decoded kills: ${bold}syshealth oom${reset}\n"
+        printf "  who was growing before the kill: ${bold}syshealth mem 24${reset}\n"
       else
         printf "  ${green}none${reset}\n"
       fi
@@ -822,5 +958,7 @@ case "${1:-}" in
   watch)      watch_mode "${2:-60}" ;;
   oom)        oom_detail ;;
   oom-record) oom_record "${2:-10}" ;;
+  mem)        mem_report "${2:-6}" ;;
+  mem-sample) mem_sample ;;
   *)          full_report ;;
 esac

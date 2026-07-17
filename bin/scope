@@ -35,6 +35,9 @@ Options:
                     only when no un-marked sibling can relieve pressure
   --oom-omit        ManagedOOMPreference=omit — oomd never kills this scope
                     (it thrashes rather than dies; pairs with a kernel backstop)
+  --oom-score-adj=N OOMScoreAdjust=N (-1000..1000) — bias the KERNEL OOM killer
+                    for every process in the scope. Children inherit it, so only
+                    demote (negative N) a scope whose heavy work runs elsewhere
   --name=NAME       Cgroup unit "scope-NAME-PID.scope" (default: auto-generated)
   -h, --help        Show this help
 
@@ -57,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --swap-max=*) props+=("MemorySwapMax=${1#--swap-max=}"); shift ;;
     --oom-avoid)  props+=("ManagedOOMPreference=avoid"); shift ;;
     --oom-omit)   props+=("ManagedOOMPreference=omit"); shift ;;
+    --oom-score-adj=*) props+=("OOMScoreAdjust=${1#--oom-score-adj=}"); shift ;;
     --name=*)     name="${1#--name=}"; shift ;;
     -h|--help)    usage; exit 0 ;;
     --)           shift; break ;;

@@ -84,11 +84,12 @@ wt() {
 #     reclaim activity that a systemd-oomd *pressure* kill ranks victims on. An
 #     earlier 512M cap pinned that heap in RAM (anon pages have nowhere to go
 #     but swap), which inflated claude's pressure signature and made it the
-#     pressure-kill victim — every observed kill was pressure-based. The swap-hog
-#     protection the cap was meant to provide (not being oomd's swap-kill target)
-#     now comes directly from ManagedOOMPreference=omit below, which covers both
-#     swap and pressure kills. Set e.g. 4G only if several concurrent sessions
-#     start filling the small system swap and provoking collateral swap-kills.
+#     pressure-kill victim. The swap-hog protection the cap was meant to provide
+#     (not being oomd's swap-kill target) now comes from oomd's swap killer
+#     being off entirely (see install-ubuntu.sh: its swap path ignores omit on
+#     user-owned cgroups — proven 2026-07-17 when it killed an omit-marked
+#     claude scope holding 13.5G swap). Set e.g. 4G only if sessions filling
+#     swap starts starving other workloads.
 #   CLAUDE_SCOPE_MEMORY_HIGH (default 32G) — MemoryHigh per scope. Soft
 #     throttle: the kernel reclaims and slows allocations past this but
 #     never kills.
@@ -97,17 +98,22 @@ wt() {
 #     kernel backstop against a pathological runaway.
 #   CLAUDE_OOMD_PREFERENCE (default omit) — ManagedOOMPreference on the scope.
 #     systemd-oomd ignores earlyoom's name lists, OOMScoreAdjust, and the kernel
-#     score; ManagedOOMPreference is the *only* lever it honours. "avoid" merely
-#     demotes claude below un-marked siblings — but at true memory+swap
-#     exhaustion (every observed kill fired at ~95% RAM and ~100% swap together)
-#     oomd reaps repeatedly, and once the un-marked hogs are gone an actively
-#     allocating claude becomes the heaviest *eligible* victim and dies anyway.
-#     "omit" makes claude categorically ineligible, so oomd reaps a dev server,
-#     clickhouse, or an un-named background session instead; the kernel OOM
-#     killer (which omit does NOT bind) plus earlyoom's --avoid list remain the
-#     last-resort backstop. "avoid" and "none" stay available for the rare case
-#     where many concurrent claude sessions are themselves the only swap holders
-#     and you need oomd to be able to thin them. "none" opts out entirely.
+#     score; ManagedOOMPreference is the *only* lever it honours — and even that
+#     only on some paths. Per systemd.resource-control(5) oomd trusts the xattr
+#     on a user-owned cgroup ONLY when the monitored ancestor has the same
+#     owner: true for pressure kills via user@.service (uid == uid), never for
+#     swap kills or anything monitored on root-owned user.slice. That is why
+#     install-ubuntu.sh no longer opts user.slice into oomd at all — on the one
+#     remaining (pressure) path, "omit" makes claude categorically ineligible,
+#     so oomd reaps a dev server, clickhouse, or an un-named background session
+#     instead. The kernel OOM killer (which omit does NOT bind) plus earlyoom's
+#     --avoid list remain the last-resort backstop; both kill per-process, so
+#     they take a fat child, not the session. "none" opts out entirely.
+#   CLAUDE_SCOPE_OOM_SCORE_ADJ (unset) — OOMScoreAdjust on the scope: bias the
+#     kernel OOM killer away from the session (e.g. -600). Children inherit it,
+#     so this only helps once heavy child work (tests, dev servers) runs in its
+#     own sibling scope via `scope` — otherwise it shields the very processes
+#     the kernel backstop should be taking first. Leave unset until then.
 #
 # A function is used rather than a PATH-prepended wrapper script because
 # `mise activate zsh` (sourced below) restores PATH from a captured
@@ -137,6 +143,7 @@ claude() {
   esac
   [[ -n "${CLAUDE_SCOPE_SWAP_MAX:-}" ]] && caps+=("--swap-max=${CLAUDE_SCOPE_SWAP_MAX}")
   [[ -n "${CLAUDE_SCOPE_MEMORY_MAX:-}" ]] && caps+=("--max=${CLAUDE_SCOPE_MEMORY_MAX}")
+  [[ -n "${CLAUDE_SCOPE_OOM_SCORE_ADJ:-}" ]] && caps+=("--oom-score-adj=${CLAUDE_SCOPE_OOM_SCORE_ADJ}")
   scope "${caps[@]}" -- "$bin" "$@"
 }
 
