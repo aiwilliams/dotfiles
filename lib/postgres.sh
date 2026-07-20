@@ -184,6 +184,16 @@ pg_drop_worktree_dbs() {
     pg_drop_db "${prefix}_${sanitized}"
   done
 
+  # Integration runs clone per-run databases (platform_<wt>_test_<hash>) owned
+  # by the worktree role; runs killed before teardown leak them, and any
+  # database still owned by the role blocks DROP USER.
+  if pg_user_exists "$sanitized"; then
+    local leaked_db
+    while IFS= read -r leaked_db; do
+      [[ -n "$leaked_db" ]] && pg_drop_db "$leaked_db"
+    done < <(pg_exec "SELECT d.datname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE r.rolname = '$sanitized';")
+  fi
+
   pg_drop_user "$sanitized"
   echo "==> Done."
 }
