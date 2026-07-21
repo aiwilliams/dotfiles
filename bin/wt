@@ -231,6 +231,30 @@ write_agent_env() {
   ensure_dbhub_config
 }
 
+# True when an env var holds an affirmative value (yes/y/1/true, any case).
+env_is_yes() {
+  local value
+  value=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+  [[ "$value" == "yes" || "$value" == "y" || "$value" == "1" || "$value" == "true" ]]
+}
+
+# Run WT_POST_CREATE in a worktree, if it is set. No-op when unset.
+# stdin is closed so a child that prompts on the controlling terminal (e.g.
+# `prisma migrate dev` asking to reset the database) gets EOF and fails fast
+# instead of blocking forever — wt is routinely driven non-interactively.
+# Returns the command's exit status, naming it on failure.
+run_post_create() {
+  local wt_dir="$1"
+  [[ -n "${WT_POST_CREATE:-}" ]] || return 0
+  echo -e "${BOLD}Running post-create...${NC}"
+  if (cd "$wt_dir" && eval "$WT_POST_CREATE") </dev/null; then
+    return 0
+  fi
+  echo -e "${RED}Post-create command failed:${NC} ${WT_POST_CREATE}" >&2
+  echo -e "${DIM}Run it yourself in ${wt_dir} to see the full output.${NC}" >&2
+  return 1
+}
+
 # Ensure ~/projects/private/dbhub.private.toml has a [[sources]] entry for
 # this project (local-dev-<repo_name>). Creates the file if missing.
 ensure_dbhub_config() {
@@ -724,10 +748,16 @@ POST-CREATE HOOK
 
   Set WT_POST_CREATE in .wtrc to run a command after databases are cloned
   and .env is written. The command runs in the worktree directory with the
-  worktree's .env already in place. Fires on both 'wt create' and 'wt db-init'.
+  worktree's .env already in place, and fires on 'wt create', 'wt db-init',
+  and 'wt db-clone'.
 
   This is useful for project-specific setup that must follow database cloning,
   such as applying schema migrations that haven't reached the main branch yet.
+
+  It runs with stdin closed, so a child that prompts on the terminal (e.g.
+  `prisma migrate dev` asking to reset the database) fails on EOF instead of
+  hanging. A failing post-create is reported and makes wt exit non-zero; run
+  the command yourself in the worktree to see the full output.
 
   Example:
 
@@ -784,10 +814,16 @@ DATABASE MANAGEMENT
 
     The source argument accepts a worktree number (2), id (wt2), or 'main'.
 
+    Set WT_DB_CLONE_CONFIRM=yes (also y/1/true) to skip the confirmation
+    prompt — required for unattended runs. The destructive summary is still
+    printed. Without it, db-clone refuses to run when stdin is not a terminal
+    rather than blocking on a prompt nobody can answer.
+
     Examples:
       wt db-clone 2               # clone from wt2 into current worktree
       wt db-clone wt2             # same as above
       wt db-clone main            # clone from main into current worktree
+      WT_DB_CLONE_CONFIRM=yes wt db-clone main    # unattended (scripts, agents)
 
   wt db-status
 
@@ -1035,11 +1071,13 @@ cmd_create() {
   # Write .env.agent with plugin-provided agent env vars
   write_agent_env "$wt_dir" "$wt_id"
 
-  # Run project-specific post-create command (e.g. schema migrations)
+  # Run project-specific post-create command (e.g. schema migrations). A
+  # failure is reported but not fatal: the worktree itself is usable, and the
+  # zsh wrapper only cds into it when wt exits 0.
+  local post_create_failed=false
   if [[ -n "${WT_POST_CREATE:-}" ]]; then
     echo ""
-    echo -e "${BOLD}Running post-create...${NC}"
-    (cd "$wt_dir" && eval "$WT_POST_CREATE")
+    run_post_create "$wt_dir" || post_create_failed=true
   fi
 
   # Track branch in Graphite — only if it isn't tracked already, and never by
@@ -1062,7 +1100,11 @@ cmd_create() {
   fi
 
   echo ""
-  echo -e "${BOLD}Ready!${NC}"
+  if [[ "$post_create_failed" == true ]]; then
+    echo -e "${YELLOW}Worktree created, but post-create did not complete.${NC}"
+  else
+    echo -e "${BOLD}Ready!${NC}"
+  fi
 
   # Write path for shell wrapper to pick up for cd
   echo "$wt_dir" > /tmp/wt_cd_path
@@ -2139,6 +2181,7 @@ cmd_db_init() {
   parent_dir=$(dirname "$main_dir")
 
   local -a wt_dirs=() wt_ids=()
+  local post_create_failed=false
 
   if $do_all; then
     # Main worktree
@@ -2175,12 +2218,12 @@ cmd_db_init() {
       echo -e "${GREEN}Updated database env vars${NC}"
     fi
     write_agent_env "$wt_dir" "$wt_id"
-    if [[ -n "${WT_POST_CREATE:-}" ]]; then
-      echo -e "${BOLD}Running post-create...${NC}"
-      (cd "$wt_dir" && eval "$WT_POST_CREATE")
-    fi
+    run_post_create "$wt_dir" || post_create_failed=true
     echo ""
   done
+
+  [[ "$post_create_failed" == true ]] && return 1
+  return 0
 }
 
 cmd_db_clone() {
@@ -2243,29 +2286,38 @@ cmd_db_clone() {
   wt_dispatch_hook status "$wt_id"
   echo ""
 
+  # The destructive summary is printed either way, so the log always records
+  # what was dropped — including on bypassed, unattended runs.
   echo -e "${YELLOW}This will drop all databases for ${wt_id} and clone from ${source_wt_id}.${NC}"
-  read -r -p "Continue? [y/N] " confirm
-  if [[ "$confirm" != [yY] ]]; then
-    echo "Aborted."
+  if env_is_yes "${WT_DB_CLONE_CONFIRM:-}"; then
+    echo -e "${DIM}Confirmed by WT_DB_CLONE_CONFIRM=${WT_DB_CLONE_CONFIRM}.${NC}"
+  elif [[ ! -t 0 ]]; then
+    echo -e "${RED}Refusing to prompt: stdin is not a terminal.${NC}" >&2
+    echo -e "${DIM}Re-run with WT_DB_CLONE_CONFIRM=yes to confirm non-interactively.${NC}" >&2
     return 1
+  else
+    read -r -p "Continue? [y/N] " confirm
+    if [[ "$confirm" != [yY] ]]; then
+      echo "Aborted."
+      return 1
+    fi
   fi
   echo ""
 
-  wt_dispatch_hook clone "$wt_id" "$source_wt_id"
+  # stdin closed on the plugin hooks too: a client that falls back to a
+  # password prompt (psql, clickhouse client) must fail, not hang.
+  wt_dispatch_hook clone "$wt_id" "$source_wt_id" </dev/null || return 1
 
   local wt_dir
   wt_dir=$(git rev-parse --show-toplevel)
   local env_file
   env_file=$(env_file_for "$wt_dir")
   if [[ -f "$env_file" ]]; then
-    wt_dispatch_hook env "$env_file" "$wt_id"
+    wt_dispatch_hook env "$env_file" "$wt_id" </dev/null
     echo -e "${GREEN}Updated database env vars${NC}"
   fi
   write_agent_env "$wt_dir" "$wt_id"
-  if [[ -n "${WT_POST_CREATE:-}" ]]; then
-    echo -e "${BOLD}Running post-create...${NC}"
-    (cd "$wt_dir" && eval "$WT_POST_CREATE")
-  fi
+  run_post_create "$wt_dir" || return 1
 
   echo ""
   echo -e "${GREEN}Done. Databases for ${wt_id} cloned from ${source_wt_id}.${NC}"

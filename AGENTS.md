@@ -17,6 +17,8 @@ Local development uses native PostgreSQL 18 with pgvector (not Docker). Two CLI 
 
 Creates worktrees as sibling directories with auto-numbered IDs. Automatically clones databases, wires `.env`, and runs project setup. Run `wt help` for full documentation.
 
+Running it unattended (scripts, AI agents): `wt db-clone` is destructive and asks for confirmation, so set `WT_DB_CLONE_CONFIRM=yes` (also accepts `y`/`1`/`true`) — without it, db-clone aborts instead of prompting when stdin is not a terminal. `WT_POST_CREATE` (from `.wtrc`) runs with stdin closed on every path that invokes it, so a child that prompts on the terminal fails on EOF rather than hanging; wt exits non-zero and names the command.
+
 ## `pg` — PostgreSQL Query Runner
 
 Execute SQL against project databases using connection info from `.env` files. Auto-discovers `.env` in the current directory or `apps/platform/.env` from the git root. Run `pg -h` for full usage.
