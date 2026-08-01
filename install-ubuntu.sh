@@ -224,8 +224,17 @@ fi
 #   raw badness and the intent was never actually encoded. Verified with
 #   `earlyoom --dryrun --debug`: both score 666 (no bonus) under the old regex
 #   and 966 (+300, "<--- new victim") under this one.
+#   The vitest alternative is written "node .vitest." with DOT WILDCARDS, not
+#   escaped parens. systemd's EnvironmentFile parser unescapes backslashes
+#   inside the double-quoted value, so a "\(" written here reaches earlyoom as
+#   a bare "(" — an ERE capture group, which silently matches "node vitest"
+#   (a process that does not exist) instead of the real "node (vitest)". The
+#   quoting IS otherwise honored: systemd passes the regex as one argv entry
+#   despite the embedded space. Verify any change against what earlyoom logs
+#   at startup, NOT against a shell command line:
+#     journalctl -u earlyoom -n20 | grep Preferring
 EARLYOOM_CONF="/etc/default/earlyoom"
-EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 3,1 -s 5,2 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea|claude)\$' --prefer '^(next-server|node \(vitest\)|node|tsc|tsgo|chrome|firefox)\$' -n\""
+EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 3,1 -s 5,2 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea|claude)\$' --prefer '^(next-server|node .vitest.|node|tsc|tsgo|chrome|firefox)\$' -n\""
 if [ ! -f "$EARLYOOM_CONF" ] || ! diff -q <(echo "$EARLYOOM_DESIRED") "$EARLYOOM_CONF" &>/dev/null; then
   echo "Configuring earlyoom..."
   echo "$EARLYOOM_DESIRED" | sudo tee "$EARLYOOM_CONF" > /dev/null
