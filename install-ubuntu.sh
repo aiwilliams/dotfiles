@@ -75,12 +75,20 @@ fi
 # Cap Airbyte's k3s container to 32GB so JVMs using -XX:MaxRAMPercentage see
 # a realistic limit instead of the full host RAM. Pods must restart to pick up
 # the new cgroup limit (abctl local install --values handles this).
+# Restart policy "no": Airbyte must not auto-start with the Docker daemon
+# (its default on-failure policy resurrects it after every host crash/reboot).
+# Start it manually with: docker start airbyte-abctl-control-plane
 if docker inspect airbyte-abctl-control-plane &>/dev/null; then
   CURRENT_MEM=$(docker inspect airbyte-abctl-control-plane --format '{{.HostConfig.Memory}}')
   TARGET_MEM=$((32 * 1024 * 1024 * 1024))  # 32G in bytes
   if [ "$CURRENT_MEM" != "$TARGET_MEM" ]; then
     echo "Setting Airbyte container memory limit to 32G..."
     docker update --memory 32g --memory-swap 36g airbyte-abctl-control-plane
+  fi
+  CURRENT_RESTART=$(docker inspect airbyte-abctl-control-plane --format '{{.HostConfig.RestartPolicy.Name}}')
+  if [ "$CURRENT_RESTART" != "no" ]; then
+    echo "Disabling Airbyte container auto-restart..."
+    docker update --restart=no airbyte-abctl-control-plane
   fi
 fi
 
@@ -224,8 +232,17 @@ fi
 #   raw badness and the intent was never actually encoded. Verified with
 #   `earlyoom --dryrun --debug`: both score 666 (no bonus) under the old regex
 #   and 966 (+300, "<--- new victim") under this one.
+#   The vitest alternative is written "node .vitest." with DOT WILDCARDS, not
+#   escaped parens. systemd's EnvironmentFile parser unescapes backslashes
+#   inside the double-quoted value, so a "\(" written here reaches earlyoom as
+#   a bare "(" — an ERE capture group, which silently matches "node vitest"
+#   (a process that does not exist) instead of the real "node (vitest)". The
+#   quoting IS otherwise honored: systemd passes the regex as one argv entry
+#   despite the embedded space. Verify any change against what earlyoom logs
+#   at startup, NOT against a shell command line:
+#     journalctl -u earlyoom -n20 | grep Preferring
 EARLYOOM_CONF="/etc/default/earlyoom"
-EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 3,1 -s 5,2 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea|claude)\$' --prefer '^(next-server|node \(vitest\)|node|tsc|tsgo|chrome|firefox)\$' -n\""
+EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 3,1 -s 5,2 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea|claude)\$' --prefer '^(next-server|node .vitest.|node|tsc|tsgo|chrome|firefox)\$' -n\""
 if [ ! -f "$EARLYOOM_CONF" ] || ! diff -q <(echo "$EARLYOOM_DESIRED") "$EARLYOOM_CONF" &>/dev/null; then
   echo "Configuring earlyoom..."
   echo "$EARLYOOM_DESIRED" | sudo tee "$EARLYOOM_CONF" > /dev/null
