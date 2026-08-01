@@ -216,8 +216,16 @@ fi
 #   comm=claude) is protected the same way — it is itself a node process, so
 #   without this guard --prefer would target long-running interactive sessions
 #   first; runaway build/dev node processes stay in --prefer and die before it.
+# --prefer matches against /proc/PID/comm, NOT the cmdline, and the two biggest
+#   consumers on this box do not present as plain "node":
+#     vitest workers set comm to "node (vitest)"  (13-15G each)
+#     the TypeScript 7 native compiler is comm "tsc", not "tsgo" (~10G)
+#   Neither matched "^node$"/"^tsgo$", so earlyoom fell back to ranking them by
+#   raw badness and the intent was never actually encoded. Verified with
+#   `earlyoom --dryrun --debug`: both score 666 (no bonus) under the old regex
+#   and 966 (+300, "<--- new victim") under this one.
 EARLYOOM_CONF="/etc/default/earlyoom"
-EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 3,1 -s 5,2 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea|claude)\$' --prefer '^(next-server|node|tsgo|chrome|firefox)\$' -n\""
+EARLYOOM_DESIRED="EARLYOOM_ARGS=\"-m 3,1 -s 5,2 -r 3600 --avoid '^(tailscaled|sshd|systemd|containerd|dockerd|postgres|idea|claude)\$' --prefer '^(next-server|node \(vitest\)|node|tsc|tsgo|chrome|firefox)\$' -n\""
 if [ ! -f "$EARLYOOM_CONF" ] || ! diff -q <(echo "$EARLYOOM_DESIRED") "$EARLYOOM_CONF" &>/dev/null; then
   echo "Configuring earlyoom..."
   echo "$EARLYOOM_DESIRED" | sudo tee "$EARLYOOM_CONF" > /dev/null
@@ -238,6 +246,39 @@ fi
 
 sudo systemctl enable earlyoom
 sudo systemctl restart earlyoom
+
+# --- Admission backstop for concurrent agent work (agent-work.slice) ---
+#
+# The per-command caps in the agent guidance (`scope --max=16G pnpm test`) were
+# each measured for a job running ALONE. With a dozen agents across worktrees,
+# six concurrent scopes were observed committing ~108G of MemoryMax on a 61G
+# box. Nothing arbitrates that, so the failure mode is NOT a kill: the box
+# swap-thrashes and jobs stall at a fraction of normal speed while their own
+# caps sit unreached, which agents experience as a hung command.
+#
+# `scope --class=work` puts every such job in this one slice, so MemoryHigh
+# applies to their SUM and the kernel reclaims against the aggregate. It
+# throttles rather than kills (verified: memory.high events accumulate,
+# memory.oom_kill stays 0) — the per-scope MemoryMax still catches a single
+# runaway job. MemorySwapMax keeps this slice from driving system swap toward
+# exhaustion, the condition behind the 2026-07-16/17 claude-session kills.
+#
+# Sized for 61G total: ~24G ceiling for ClickHouse, ~5G for claude sessions
+# and misc daemons, leaving 32G for the work. Tune live without a reload:
+#   systemctl --user set-property agent-work.slice MemoryHigh=<size>
+AGENT_SLICE_DIR="$HOME/.config/systemd/user"
+mkdir -p "$AGENT_SLICE_DIR"
+
+cat > "$AGENT_SLICE_DIR/agent-work.slice" <<'UNIT'
+[Unit]
+Description=Expendable agent work (test suites, builds, type-checks)
+
+[Slice]
+MemoryHigh=32G
+MemorySwapMax=8G
+UNIT
+
+systemctl --user daemon-reload
 
 # --- Memory forensics sampler (syshealth memsnap) ---
 #

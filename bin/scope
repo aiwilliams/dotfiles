@@ -18,6 +18,28 @@
 # picked over a larger-but-idle one; --oom-avoid demotes it below un-marked
 # siblings (e.g. dev servers) so those die first.
 #
+# --class=work is the flag for expendable agent work (test suites, builds,
+# type-checks). It does two things a bare --max cannot:
+#
+#   1. Slice=agent-work.slice — puts every such job in ONE cgroup with a
+#      shared MemoryHigh. --max sizes each job as if it runs alone, which is
+#      how those caps were measured; six concurrent 16-20G scopes therefore
+#      promise ~108G on a 61G box. Nothing arbitrates that, so the box swaps
+#      instead of any single scope hitting its cap — jobs stall at a fraction
+#      of normal speed rather than dying, which reads as "the agent hung".
+#      The slice makes the kernel reclaim against the SUM, so work throttles
+#      and interactive sessions stay responsive.
+#
+#   2. oom_score_adj=+500 — biases the KERNEL OOM killer toward this work.
+#      This is written to /proc/self/oom_score_adj, NOT passed as a systemd
+#      property: scope units have no exec context, so systemd rejects
+#      OOMScoreAdjust on them outright ("Unknown assignment"). Raising is
+#      unprivileged; LOWERING needs CAP_SYS_RESOURCE and a user manager
+#      silently refuses it. That asymmetry is why the victim ordering is
+#      established by pushing expendable work UP rather than protecting
+#      sessions down. Children inherit it, which is correct here — everything
+#      under an agent-work scope is expendable by definition.
+#
 # On macOS or any system without systemd-run, scope is a transparent
 # pass-through so scripts using it stay portable.
 
@@ -35,9 +57,15 @@ Options:
                     only when no un-marked sibling can relieve pressure
   --oom-omit        ManagedOOMPreference=omit — oomd never kills this scope
                     (it thrashes rather than dies; pairs with a kernel backstop)
-  --oom-score-adj=N OOMScoreAdjust=N (-1000..1000) — bias the KERNEL OOM killer
-                    for every process in the scope. Children inherit it, so only
-                    demote (negative N) a scope whose heavy work runs elsewhere
+  --oom-score-adj=N Write N (0..1000) to /proc/self/oom_score_adj before exec,
+                    biasing the KERNEL OOM killer for every process in the
+                    scope. Children inherit it. Only positive values work:
+                    lowering needs CAP_SYS_RESOURCE, which a user manager
+                    does not have (it silently keeps the inherited value)
+  --class=work      Expendable agent work: Slice=agent-work.slice (shared
+                    MemoryHigh across ALL such jobs) + oom_score_adj=+500 so
+                    this dies before ClickHouse or a claude session. Use for
+                    every test/build/type-check an agent launches
   --name=NAME       Cgroup unit "scope-NAME-PID.scope" (default: auto-generated)
   -h, --help        Show this help
 
@@ -47,11 +75,14 @@ Examples:
   scope pnpm dev
   scope --max=12G --high=8G pnpm dev
   scope --max=16G --name=next-dev pnpm dev-only
+  scope --class=work --max=16G pnpm run type-check
 EOF
 }
 
 declare -a props=()
 name=""
+slice=""
+oom_adj=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,7 +91,13 @@ while [[ $# -gt 0 ]]; do
     --swap-max=*) props+=("MemorySwapMax=${1#--swap-max=}"); shift ;;
     --oom-avoid)  props+=("ManagedOOMPreference=avoid"); shift ;;
     --oom-omit)   props+=("ManagedOOMPreference=omit"); shift ;;
-    --oom-score-adj=*) props+=("OOMScoreAdjust=${1#--oom-score-adj=}"); shift ;;
+    --oom-score-adj=*) oom_adj="${1#--oom-score-adj=}"; shift ;;
+    --class=*)
+      case "${1#--class=}" in
+        work) slice="agent-work.slice"; oom_adj="${oom_adj:-500}" ;;
+        *)    printf 'scope: unknown class: %s (known: work)\n' "${1#--class=}" >&2; exit 2 ;;
+      esac
+      shift ;;
     --name=*)     name="${1#--name=}"; shift ;;
     -h|--help)    usage; exit 0 ;;
     --)           shift; break ;;
@@ -69,17 +106,35 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Bias the kernel OOM killer before exec. systemd cannot do this for us:
+# OOMScoreAdjust is an exec-context property and scope units have no exec
+# context, so passing it as --property fails with "Unknown assignment".
+# Non-fatal — a refused write (always the case for a negative value under an
+# unprivileged user manager) must not stop the command from running.
+apply_oom_adj() {
+  [[ -n "$oom_adj" ]] || return 0
+  [[ -w /proc/self/oom_score_adj ]] || return 0
+  if ! echo "$oom_adj" >/proc/self/oom_score_adj 2>/dev/null; then
+    printf 'scope: could not set oom_score_adj=%s (needs CAP_SYS_RESOURCE to lower)\n' \
+      "$oom_adj" >&2
+  fi
+}
+
 if [[ $# -eq 0 ]]; then
   usage >&2
   exit 2
 fi
 
 if [[ "$(uname -s)" != Linux ]] || ! command -v systemd-run >/dev/null 2>&1; then
+  apply_oom_adj
   exec "$@"
 fi
 
+apply_oom_adj
+
 run=(systemd-run --user --scope --quiet --collect)
 [[ -n "$name" ]] && run+=(--unit="scope-${name}-$$.scope")
+[[ -n "$slice" ]] && run+=(--slice="$slice")
 if [[ ${#props[@]} -gt 0 ]]; then
   for p in "${props[@]}"; do
     run+=(--property="$p")
