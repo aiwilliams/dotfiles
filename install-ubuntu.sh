@@ -650,15 +650,46 @@ Restart=on-failure
 # systemd-oomd kills the swap-heaviest scopes (a claude session died first).
 # ClickHouse reads the cgroup limit to size max_server_memory_usage, so big
 # queries fail with MEMORY_LIMIT_EXCEEDED instead of the kernel OOM-killing
-# the server. MemoryHigh throttles/reclaims before the hard cap bites;
-# MemorySwapMax keeps it from dominating swap and tripping oomd again.
-MemoryHigh=20G
+# the server.
+#
+# MemoryHigh MUST stay ABOVE max_server_memory_usage, which ClickHouse derives
+# at startup as 0.9 x MemoryMax (24G -> 21.6G). It reads memory.max, NOT
+# memory.high, so a memory.high set below that figure is invisible to it: it
+# keeps allocating toward 21.6G while the kernel reclaims from the lower
+# ceiling, and the two fight forever. That is not a theoretical ordering —
+# a hand-set MemoryHigh=14G put the server in exactly that state on
+# 2026-08-01: 319M memory.high events, 36M major faults, its 4G swap
+# allowance exhausted with 6M failed swap attempts, memory.pressure "full"
+# at 94% for hours, ~6 cores burned entirely on reclaim, and the HTTP port
+# timing out — all while 20G sat free on the box. Raising the ceiling to 22G
+# dropped pressure to 0.07% and the footprint to 2.5G within a minute: the
+# 15G it appeared to "need" was reclaim churn, not working set.
+#
+# So: 22G high < 24G max, with 21.6G of self-limit in between. ClickHouse's
+# own limiter fires first (clean MEMORY_LIMIT_EXCEEDED), memory.high is the
+# backstop, and memory.max is the wall. MemorySwapMax=8G leaves room to park
+# cold pages — at 4G it filled completely and forced reclaim to come out of
+# the active set, which is what turned throttling into a refault treadmill.
+MemoryHigh=22G
 MemoryMax=24G
-MemorySwapMax=4G
+MemorySwapMax=8G
 
 [Install]
 WantedBy=default.target
 UNIT
+
+# Drop any persistent overrides left by `systemctl --user set-property`. That
+# command writes to user.control/, which SHADOWS the unit file above — so a
+# one-off tuning during an incident silently becomes the permanent config and
+# this installer stops being authoritative. That is how MemoryHigh ended up
+# pinned at 14G while the unit file said 20G. To tune without leaving a
+# landmine, pass --runtime (cleared on reboot); to change it for good, edit
+# the unit above.
+CH_CONTROL_DIR="$HOME/.config/systemd/user.control/clickhouse-server.service.d"
+if [ -d "$CH_CONTROL_DIR" ]; then
+  echo "Removing set-property overrides shadowing clickhouse-server.service..."
+  rm -rf "$CH_CONTROL_DIR"
+fi
 
 systemctl --user daemon-reload
 systemctl --user enable clickhouse-server
