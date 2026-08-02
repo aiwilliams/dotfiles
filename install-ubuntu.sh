@@ -694,6 +694,21 @@ cat > "$CH_CONFIG" <<'CHCONF'
 
     <mlock_executable>true</mlock_executable>
 
+    <!-- Shared-singleton limits. One server backs every worktree and every
+         agent, so an unbounded query is not a local problem: it starves
+         everyone else's integration suite. All of these default to 0
+         (unlimited), which is fine single-tenant and wrong here. -->
+
+    <!-- A query stampede queues instead of exhausting the server. Generous
+         for ~12 agents x 8 vitest forks. -->
+    <max_concurrent_queries>100</max_concurrent_queries>
+
+    <!-- Default 480s, so a dropped database sits in metadata_dropped/ for
+         eight minutes before real deletion. Integration suites create and drop
+         test_* / pg_replica_test_* databases fast enough that this leaves a
+         standing backlog of dead tables the background pools still track. -->
+    <database_atomic_delay_before_drop_table_sec>60</database_atomic_delay_before_drop_table_sec>
+
     <send_crash_reports>
         <enabled>true</enabled>
         <send_logical_errors>true</send_logical_errors>
@@ -735,8 +750,30 @@ cat > "$CH_CONFIG" <<'CHCONF'
         </default>
     </users>
 
+    <!-- Per-query ceilings for the default profile. Deliberately in <profiles>
+         and NOT <constraints>, so a client that genuinely needs more can say
+         SETTINGS max_memory_usage=... on the query. These are a safety net for
+         the shared server, not a wall.
+         Sized against a dataset whose largest table is ~320 KiB: 4 GiB is
+         ~1000x the biggest thing here, and 300s is far beyond any healthy
+         query — both exist to catch runaways, not to shape normal work. -->
     <profiles>
-        <default/>
+        <default>
+            <!-- Without this a runaway query runs forever holding threads and
+                 memory; nothing else reclaims it. Verified: a 2 Grow
+                 sum(sipHash64(number)) that otherwise takes 38.8s is killed at
+                 2.02s with TIMEOUT_EXCEEDED when the limit is 2s.
+                 KNOWN LIMIT: the deadline is checked while the query processes
+                 data, so it catches CPU/IO-bound runaways (the realistic case
+                 here — accidental cross joins, unbounded aggregations) but NOT
+                 a query parked in sleep() or blocked on an external wait.
+                 Treat it as a runaway catcher, not a hard SLA. -->
+            <max_execution_time>300</max_execution_time>
+            <!-- One worktree's runaway aggregation fails with a clean
+                 MEMORY_LIMIT_EXCEEDED instead of consuming the server's whole
+                 21.6 GiB budget and starving every other agent. -->
+            <max_memory_usage>4294967296</max_memory_usage>
+        </default>
     </profiles>
 
     <quotas>
