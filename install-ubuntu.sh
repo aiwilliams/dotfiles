@@ -75,12 +75,20 @@ fi
 # Cap Airbyte's k3s container to 32GB so JVMs using -XX:MaxRAMPercentage see
 # a realistic limit instead of the full host RAM. Pods must restart to pick up
 # the new cgroup limit (abctl local install --values handles this).
+# Restart policy "no": Airbyte must not auto-start with the Docker daemon
+# (its default on-failure policy resurrects it after every host crash/reboot).
+# Start it manually with: docker start airbyte-abctl-control-plane
 if docker inspect airbyte-abctl-control-plane &>/dev/null; then
   CURRENT_MEM=$(docker inspect airbyte-abctl-control-plane --format '{{.HostConfig.Memory}}')
   TARGET_MEM=$((32 * 1024 * 1024 * 1024))  # 32G in bytes
   if [ "$CURRENT_MEM" != "$TARGET_MEM" ]; then
     echo "Setting Airbyte container memory limit to 32G..."
     docker update --memory 32g --memory-swap 36g airbyte-abctl-control-plane
+  fi
+  CURRENT_RESTART=$(docker inspect airbyte-abctl-control-plane --format '{{.HostConfig.RestartPolicy.Name}}')
+  if [ "$CURRENT_RESTART" != "no" ]; then
+    echo "Disabling Airbyte container auto-restart..."
+    docker update --restart=no airbyte-abctl-control-plane
   fi
 fi
 
