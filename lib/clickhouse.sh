@@ -7,6 +7,11 @@ CH_TCP_PORT=9000
 CH_HTTP_PORT=8123
 CH_BIN="$HOME/.local/bin/clickhouse"
 CH_DATA="$HOME/.local/share/clickhouse"
+# Server config. Kept OUT of CH_DATA so wiping the data dir cannot silently
+# revert the server to its embedded defaults (which log at trace to stdout).
+# Consumed by install-ubuntu.sh, which sources this file — hence unused here.
+# shellcheck disable=SC2034
+CH_CONFIG="$HOME/.config/clickhouse-server/config.xml"
 
 # --------------------------------------------------------------------------
 # Low-level helpers
