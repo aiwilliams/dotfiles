@@ -264,6 +264,30 @@ fi
 sudo systemctl enable earlyoom
 sudo systemctl restart earlyoom
 
+# --- journald bounds ---
+#
+# journald.conf shipped empty, so everything ran on defaults: SystemMaxUse is
+# then 10% of /var capped at 4G, which the box reached — 4.1G of journal
+# holding barely two days, because ClickHouse was 99.4% of all entries. An
+# explicit cap makes the ceiling intentional rather than incidental, and
+# keeps journal growth off the same filesystem budget as everything else.
+#
+# The rate limit stays at its default here ON PURPOSE. Raising it globally
+# would let one noisy unit evict more of everyone else's logs; the fix for a
+# flooding unit is a per-unit LogRateLimitBurst on that unit (see
+# clickhouse-server.service below), which confines the damage to itself.
+JOURNALD_CONF="/etc/systemd/journald.conf.d/00-limits.conf"
+JOURNALD_CONF_DESIRED="[Journal]
+SystemMaxUse=1G
+SystemKeepFree=2G
+MaxRetentionSec=1week"
+if [ ! -f "$JOURNALD_CONF" ] || ! diff -q <(echo "$JOURNALD_CONF_DESIRED") "$JOURNALD_CONF" &>/dev/null; then
+  echo "Bounding journald disk usage..."
+  sudo mkdir -p /etc/systemd/journald.conf.d
+  echo "$JOURNALD_CONF_DESIRED" | sudo tee "$JOURNALD_CONF" > /dev/null
+  sudo systemctl restart systemd-journald
+fi
+
 # --- Admission backstop for concurrent agent work (agent-work.slice) ---
 #
 # The per-command caps in the agent guidance (`scope --max=16G pnpm test`) were
@@ -628,6 +652,120 @@ echo "Installing ClickHouse..."
 source "$SCRIPT_DIR/lib/clickhouse.sh"
 ch_install_binary
 
+# --- Server config (exists ONLY to quiet the logger) ---
+#
+# Without a config file ClickHouse runs on the config embedded in the binary,
+# which sets <level>trace</level> + <console>true</console>. Everything then
+# goes to stdout -> journald at ~40 lines/sec on an idle server: 3.17M entries
+# in 24h on 2026-08-01, 99.4% of ALL journal volume, against 6.4k for the
+# next-noisiest unit. journald's rate limiter is per-service and ClickHouse
+# shares the per-uid user@.service bucket with every other user unit, so it
+# was suppressing ~400-500k messages per 30s window and evicting
+# claude-session and memsnap logs as collateral. Every line also carries
+# syslog PRIORITY=6 regardless of
+# its internal <Trace>/<Information> level, so systemd's LogLevelMax= cannot
+# filter it — the level has to be fixed on the ClickHouse side.
+#
+# The body below is ClickHouse's OWN rendering of the embedded default
+# (preprocessed_configs/config.xml) copied verbatim, with only <level>
+# changed. Nothing else is altered, so behaviour is identical to running with
+# no config file at all. Raise to "information" if a debugging session needs
+# query-level detail — that roughly halves the volume rather than removing it;
+# "warning" cuts ~99%.
+CH_CONFIG_DIR="$(dirname "$CH_CONFIG")"
+mkdir -p "$CH_CONFIG_DIR"
+
+cat > "$CH_CONFIG" <<'CHCONF'
+<!-- Managed by ~/dotfiles/install-ubuntu.sh. Edits here are overwritten.
+     This is ClickHouse's own embedded default config with <level> lowered
+     from trace; see the installer for why. -->
+<clickhouse>
+    <logger>
+        <level>warning</level>
+        <console>true</console>
+    </logger>
+
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    <mysql_port>9004</mysql_port>
+    <postgresql_port>9005</postgresql_port>
+
+    <path>./</path>
+
+    <mlock_executable>true</mlock_executable>
+
+    <send_crash_reports>
+        <enabled>true</enabled>
+        <send_logical_errors>true</send_logical_errors>
+        <endpoint>https://crash.clickhouse.com/</endpoint>
+    </send_crash_reports>
+
+    <http_options_response>
+        <header>
+            <name>Access-Control-Allow-Origin</name>
+            <value>*</value>
+        </header>
+        <header>
+            <name>Access-Control-Allow-Headers</name>
+            <value>origin, x-requested-with, x-clickhouse-format, x-clickhouse-user, x-clickhouse-key, Authorization</value>
+        </header>
+        <header>
+            <name>Access-Control-Allow-Methods</name>
+            <value>POST, GET, OPTIONS</value>
+        </header>
+        <header>
+            <name>Access-Control-Max-Age</name>
+            <value>86400</value>
+        </header>
+    </http_options_response>
+
+    <users>
+        <default>
+            <password/>
+
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+
+            <profile>default</profile>
+            <quota>default</quota>
+
+            <access_management>1</access_management>
+            <named_collection_control>1</named_collection_control>
+        </default>
+    </users>
+
+    <profiles>
+        <default/>
+    </profiles>
+
+    <quotas>
+        <default/>
+    </quotas>
+
+    <user_directories>
+        <users_xml>
+            <path>config.xml</path>
+        </users_xml>
+        <local_directory>
+            <path>access/</path>
+        </local_directory>
+    </user_directories>
+
+    <access_control_improvements>
+        <users_without_row_policies_can_read_rows>true</users_without_row_policies_can_read_rows>
+        <on_cluster_queries_require_cluster_grant>true</on_cluster_queries_require_cluster_grant>
+        <select_from_system_db_requires_grant>true</select_from_system_db_requires_grant>
+        <select_from_information_schema_requires_grant>true</select_from_information_schema_requires_grant>
+        <settings_constraints_replace_previous>true</settings_constraints_replace_previous>
+        <table_engines_require_grant>true</table_engines_require_grant>
+        <enable_read_write_grants>true</enable_read_write_grants>
+        <enable_user_name_access_type>true</enable_user_name_access_type>
+        <throw_on_invalid_replicated_access_entities>true</throw_on_invalid_replicated_access_entities>
+    </access_control_improvements>
+</clickhouse>
+CHCONF
+
 # Install systemd user service for auto-start (equivalent of macOS launchd plist)
 CH_SERVICE_DIR="$HOME/.config/systemd/user"
 CH_SERVICE="$CH_SERVICE_DIR/clickhouse-server.service"
@@ -641,9 +779,17 @@ After=network.target
 [Service]
 Type=simple
 Environment=TZ=UTC
-ExecStart=${CH_BIN} server -- --path=${CH_DATA}/
+ExecStart=${CH_BIN} server --config-file=${CH_CONFIG} -- --path=${CH_DATA}/
 WorkingDirectory=${CH_DATA}
 Restart=on-failure
+
+# Give ClickHouse its OWN journald rate-limit bucket. Without this it shares
+# the per-uid user@.service bucket with every other user unit, so its volume
+# suppressed ~400-500k messages per 30s window and took claude-session and
+# memsnap logs down with it. Confining the limit here means a ClickHouse flood
+# can only ever cost ClickHouse's own lines.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=2000
 
 # Never let ClickHouse take down the box: uncapped, it peaked at 51.6G mem
 # + 10.6G swap (2026-07-16) and helped drive system swap to 99.8%, where
