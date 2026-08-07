@@ -754,9 +754,25 @@ cat > "$CH_CONFIG" <<'CHCONF'
          and NOT <constraints>, so a client that genuinely needs more can say
          SETTINGS max_memory_usage=... on the query. These are a safety net for
          the shared server, not a wall.
-         Sized against a dataset whose largest table is ~320 KiB: 4 GiB is
-         ~1000x the biggest thing here, and 300s is far beyond any healthy
-         query — both exist to catch runaways, not to shape normal work. -->
+
+         SIZING, and the mistake to avoid repeating: max_memory_usage was first
+         set to 4 GiB on the reasoning that it was ~1000x the largest table
+         (~320 KiB). That reasoning is wrong. A query's peak is its working set
+         — join build sides and aggregation state — which has almost nothing to
+         do with how large the source tables are. The calendar pipeline's
+         prematerialize step has 47 JOINs and 18 GROUP BYs over small tables and
+         legitimately wants 5-9 GiB, so 4 GiB turned a whole class of local
+         integration runs into a standing MEMORY_LIMIT_EXCEEDED baseline.
+
+         The real bound is the SERVER total, not the table sizes:
+         max_server_memory_usage is 21.6 GiB (0.9 x the 24 GiB cgroup cap), and
+         it cannot simply be raised — 24 GiB for ClickHouse plus 32 GiB for
+         agent-work.slice already commits 56 of the box's 61 GiB. Exceeding the
+         per-query cap fails ONE query cleanly; exceeding the server total fails
+         arbitrary queries belonging to other agents, which is far worse and
+         much harder to diagnose. So the per-query ceiling times the realistic
+         concurrent-heavy-query count has to fit under 21.6 GiB. -->
+
     <profiles>
         <default>
             <!-- Without this a runaway query runs forever holding threads and
@@ -769,10 +785,31 @@ cat > "$CH_CONFIG" <<'CHCONF'
                  a query parked in sleep() or blocked on an external wait.
                  Treat it as a runaway catcher, not a hard SLA. -->
             <max_execution_time>300</max_execution_time>
-            <!-- One worktree's runaway aggregation fails with a clean
-                 MEMORY_LIMIT_EXCEEDED instead of consuming the server's whole
-                 21.6 GiB budget and starving every other agent. -->
-            <max_memory_usage>4294967296</max_memory_usage>
+            <!-- 12 GiB, covering the reported 5-9 GiB calendar-pipeline peaks
+                 with headroom. Verified: a 150M-key GROUP BY that dies at 4 GiB
+                 with MEMORY_LIMIT_EXCEEDED completes in 13.3s here. -->
+            <max_memory_usage>12884901888</max_memory_usage>
+
+            <!-- Spill to disk instead of climbing toward that ceiling, at half
+                 of max_memory_usage (the ClickHouse convention). A large
+                 GROUP BY or ORDER BY writes to <path>/tmp rather than growing
+                 in RAM. Slower for queries that trip it, but an integration run
+                 that finishes slowly beats one that fails. 571 GiB free on /,
+                 so spill space is not a constraint.
+
+                 DO NOT read this as making concurrency free. Measured peak
+                 cgroup memory for a SINGLE heavy query was 15 GiB against the
+                 24 GiB cap — higher than the 12 GiB per-query ceiling, because
+                 memory.current also counts page cache from the spill files.
+                 Spilling converts hard anonymous allocations into reclaimable
+                 cache, which is a real improvement under pressure, but it does
+                 not mean two such queries fit side by side. The standing
+                 guidance to serialize integration runs still applies; this
+                 raises the per-query ceiling, it does not add capacity. -->
+            <max_bytes_before_external_group_by>6442450944</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>6442450944</max_bytes_before_external_sort>
+            <max_bytes_before_external_group_by>6442450944</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>6442450944</max_bytes_before_external_sort>
         </default>
     </profiles>
 
