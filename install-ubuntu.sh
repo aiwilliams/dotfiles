@@ -709,6 +709,35 @@ cat > "$CH_CONFIG" <<'CHCONF'
          standing backlog of dead tables the background pools still track. -->
     <database_atomic_delay_before_drop_table_sec>60</database_atomic_delay_before_drop_table_sec>
 
+    <!-- System logs: query_log ONLY, with a short TTL.
+         It earns its place — it is the only way to answer "how much memory did
+         that query actually want" or "how long did it really take" after the
+         fact, instead of inferring peaks from cgroup totals. Some integration
+         suites also read it back to assert the settings a client attached to
+         its own statements, and fail outright when the table is absent.
+
+         Cost is not what people expect: measured elsewhere on this class of
+         workload, integration runs took 35.6s with the system-log writers on
+         versus 35.1s with them off — inside run-to-run noise. The real hazard
+         is unbounded DISK, and it is severe: system.trace_log has been seen to
+         reach ~181 GB / 7.9 B rows on a dev box. Hence one log, with a TTL.
+
+         DO NOT add `<some_log remove="1" />` entries here to turn the rest off.
+         That idiom belongs to config.d overlays, where it deletes an entry a
+         lower-priority layer already defined. In a MAIN config there is nothing
+         to delete, and the element's mere presence CONSTRUCTS the writer with
+         default settings — the exact opposite of the intent. Verified: adding
+         23 such entries created all 21 system log tables; deleting them left
+         query_log alone. The off switch in a main config is silence — every
+         log not named here simply never exists, because the config this file
+         derives from declares none of them.
+
+         The rendered TTL reads `TTL event_date + toIntervalDay(1)`, not the
+         literal text below, so grep for toIntervalDay when verifying. -->
+    <query_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </query_log>
+
     <send_crash_reports>
         <enabled>true</enabled>
         <send_logical_errors>true</send_logical_errors>
@@ -759,10 +788,11 @@ cat > "$CH_CONFIG" <<'CHCONF'
          set to 4 GiB on the reasoning that it was ~1000x the largest table
          (~320 KiB). That reasoning is wrong. A query's peak is its working set
          — join build sides and aggregation state — which has almost nothing to
-         do with how large the source tables are. The calendar pipeline's
-         prematerialize step has 47 JOINs and 18 GROUP BYs over small tables and
-         legitimately wants 5-9 GiB, so 4 GiB turned a whole class of local
-         integration runs into a standing MEMORY_LIMIT_EXCEEDED baseline.
+         do with how large the source tables are. A single observed pipeline
+         step ran 47 JOINs and 18 GROUP BYs over small tables and legitimately
+         wanted 5-9 GiB, so 4 GiB turned a whole class of local integration runs
+         into a standing MEMORY_LIMIT_EXCEEDED baseline that agents learned to
+         treat as expected rather than report.
 
          The real bound is the SERVER total, not the table sizes:
          max_server_memory_usage is 21.6 GiB (0.9 x the 24 GiB cgroup cap), and
@@ -785,9 +815,9 @@ cat > "$CH_CONFIG" <<'CHCONF'
                  a query parked in sleep() or blocked on an external wait.
                  Treat it as a runaway catcher, not a hard SLA. -->
             <max_execution_time>300</max_execution_time>
-            <!-- 12 GiB, covering the reported 5-9 GiB calendar-pipeline peaks
-                 with headroom. Verified: a 150M-key GROUP BY that dies at 4 GiB
-                 with MEMORY_LIMIT_EXCEEDED completes in 13.3s here. -->
+            <!-- 12 GiB, covering the reported 5-9 GiB peaks with headroom.
+                 Verified: a 150M-key GROUP BY that dies at 4 GiB with
+                 MEMORY_LIMIT_EXCEEDED completes in 13.3s here. -->
             <max_memory_usage>12884901888</max_memory_usage>
 
             <!-- Spill to disk instead of climbing toward that ceiling, at half
@@ -806,8 +836,6 @@ cat > "$CH_CONFIG" <<'CHCONF'
                  not mean two such queries fit side by side. The standing
                  guidance to serialize integration runs still applies; this
                  raises the per-query ceiling, it does not add capacity. -->
-            <max_bytes_before_external_group_by>6442450944</max_bytes_before_external_group_by>
-            <max_bytes_before_external_sort>6442450944</max_bytes_before_external_sort>
             <max_bytes_before_external_group_by>6442450944</max_bytes_before_external_group_by>
             <max_bytes_before_external_sort>6442450944</max_bytes_before_external_sort>
         </default>
