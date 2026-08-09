@@ -84,13 +84,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-# Symlink config
-mkdir -p "$HOME/.config"
-if [ -d "$HOME/.config/nvim" ] && [ ! -L "$HOME/.config/nvim" ]; then
-  echo "Backing up existing ~/.config/nvim to ~/.config/nvim.bak"
-  mv "$HOME/.config/nvim" "$HOME/.config/nvim.bak"
-fi
-ln -sfn "$SCRIPT_DIR/config/nvim" "$HOME/.config/nvim"
+# ~/.config/nvim is managed by chezmoi (aiwilliams/home) as of the Phase 3
+# cutover. This script installs neovim and its external dependencies only.
 
 echo "Neovim (LazyVim) setup complete."
-echo "  config: ~/.config/nvim -> $SCRIPT_DIR/config/nvim"
+echo "  config: ~/.config/nvim (managed by chezmoi)"
