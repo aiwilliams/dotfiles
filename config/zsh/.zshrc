@@ -128,6 +128,29 @@ claude() {
   # does not linger in the interactive shell after claude exits.
   local -x CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-60}"
 
+  # Profile dispatcher: cwd decides which config dir (history, skills, MCP
+  # servers, credentials) the session runs under. Anything inside
+  # ~/projects/personal/ gets the deliberately bare personal profile;
+  # everything else gets the work profile.
+  #
+  # Trailing slash on $PWD so the tree root itself matches the pattern.
+  # An already-set CLAUDE_CONFIG_DIR wins and is left alone (it is already
+  # exported into this call's environment), so a one-off
+  # `CLAUDE_CONFIG_DIR=... claude` still works for debugging.
+  #
+  # INTERIM (until the opine migration lands): the fallthrough is ~/.claude,
+  # so a personal repo cloned *outside* ~/projects/personal/ silently gets the
+  # work profile. Clone personal work inside the tree. Once ~/.claude is
+  # renamed to ~/.claude-opine, this fallthrough changes to that path and the
+  # now-absent ~/.claude becomes a tripwire: any session that escapes the
+  # dispatcher lands in a bare dir with no credentials and prompts for login.
+  if [[ -z "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    case "$PWD/" in
+      "$HOME/projects/personal/"*) local -x CLAUDE_CONFIG_DIR="$HOME/.claude-personal" ;;
+      *)                           local -x CLAUDE_CONFIG_DIR="$HOME/.claude" ;;
+    esac
+  fi
+
   if [[ "$(uname -s)" != Linux ]] || ! command -v scope >/dev/null 2>&1; then
     "$bin" "$@"
     return
