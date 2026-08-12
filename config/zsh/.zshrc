@@ -138,17 +138,30 @@ claude() {
   # exported into this call's environment), so a one-off
   # `CLAUDE_CONFIG_DIR=... claude` still works for debugging.
   #
-  # INTERIM (until the opine migration lands): the fallthrough is ~/.claude,
-  # so a personal repo cloned *outside* ~/projects/personal/ silently gets the
-  # work profile. Clone personal work inside the tree. Once ~/.claude is
-  # renamed to ~/.claude-opine, this fallthrough changes to that path and the
-  # now-absent ~/.claude becomes a tripwire: any session that escapes the
-  # dispatcher lands in a bare dir with no credentials and prompts for login.
-  if [[ -z "${CLAUDE_CONFIG_DIR:-}" ]]; then
-    case "$PWD/" in
-      "$HOME/projects/personal/"*) local -x CLAUDE_CONFIG_DIR="$HOME/.claude-personal" ;;
-      *)                           local -x CLAUDE_CONFIG_DIR="$HOME/.claude" ;;
-    esac
+  # The work profile is selected by leaving CLAUDE_CONFIG_DIR UNSET, not by
+  # setting it to ~/.claude. Those are not the same thing, and the difference
+  # is not where you would look for it:
+  #
+  #   unset      → config dir ~/.claude, and .claude.json at $HOME/.claude.json
+  #   =~/.claude → config dir ~/.claude, and .claude.json at ~/.claude/.claude.json
+  #
+  # Setting it relocates .claude.json into the config dir. That file does not
+  # exist there, so Claude Code creates an empty one and the session comes up
+  # as a fresh install — no MCP servers, no per-project config, no trust state
+  # — while the real 100KB+ file sits untouched one directory up. The config
+  # dir being correct makes it look like the dispatcher worked.
+  #
+  # So: personal is opt-in, work is the absence of a choice. When ~/.claude is
+  # renamed to ~/.claude-opine, $HOME/.claude.json moves to
+  # ~/.claude-opine/.claude.json in the same step, and only then can this
+  # fallthrough name a path. Until both halves move together, it must not.
+  #
+  # INTERIM: personal work cloned outside ~/projects/personal/ silently gets
+  # the work profile. Clone it inside the tree. After the rename, the absent
+  # ~/.claude becomes a tripwire instead — a bare dir with no credentials that
+  # prompts for login.
+  if [[ -z "${CLAUDE_CONFIG_DIR:-}" ]] && [[ "$PWD/" == "$HOME/projects/personal/"* ]]; then
+    local -x CLAUDE_CONFIG_DIR="$HOME/.claude-personal"
   fi
 
   if [[ "$(uname -s)" != Linux ]] || ! command -v scope >/dev/null 2>&1; then
