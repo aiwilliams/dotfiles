@@ -37,27 +37,16 @@ fi
 ln -sf "$SCRIPT_DIR/hooks/pre-commit" "$SCRIPT_DIR/.git/hooks/pre-commit"
 echo "Installed pre-commit hook"
 
-# Claude Code statusline
-mkdir -p "$HOME/.claude"
-ln -sf "$SCRIPT_DIR/config/claude/statusline-command.sh" "$HOME/.claude/statusline-command.sh"
-CLAUDE_SETTINGS="$HOME/.claude/settings.json"
-if [ ! -f "$CLAUDE_SETTINGS" ]; then
-  echo '{}' > "$CLAUDE_SETTINGS"
-fi
-jq '.statusLine = {"type": "command", "command": "bash ~/.claude/statusline-command.sh"}' \
-  "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-echo "Configured Claude Code statusline"
-
-# The *-ansi themes render diff context and dimmed text from the terminal's
-# bright-black ANSI slot, which collapses to near-invisible on dark Ghostty
-# backgrounds. Normalize to the fixed-RGB equivalents (which carry their own
-# contrast) while preserving each machine's light/dark preference.
-jq '(.theme) |= (if . == "dark-ansi" then "dark" elif . == "light-ansi" then "light" else . end)' \
-  "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-echo "Normalized Claude Code theme (no *-ansi)"
+# The Claude Code statusline is managed by chezmoi (aiwilliams/home) as of the
+# Phase 5 cutover, rendered into every profile from one shared body. The theme
+# normalization that lived here was a one-off already applied to settings.json.
+#
+# Both blocks began with `mkdir -p "$HOME/.claude"`, as did lib/agents.sh. After
+# Phase 5d that single line is destructive: it re-creates the directory whose
+# ABSENCE is the tripwire for a session that escaped the profile dispatcher.
+# lib/agents.sh is deleted for the same reason — and because the two symlinks it
+# installed had been dangling since July, pointing at lib/AGENTS.md when the file
+# is at the repo root.
 
 # Claude Code MCP servers
 source "$SCRIPT_DIR/lib/claude-mcp.sh"
-
-# Symlink AGENTS.md to AI tool config directories
-source "$SCRIPT_DIR/lib/agents.sh"
