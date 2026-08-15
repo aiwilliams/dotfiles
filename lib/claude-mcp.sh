@@ -38,7 +38,7 @@ fi
 # shifted by its offset. Pinning the dbhub process to UTC makes it read them as the
 # UTC wall-clock they were written as. (--env before `--`: the flag is variadic and
 # would otherwise swallow the `dbhub` name positional.)
-mcp_add dbhub --scope user --transport stdio dbhub --env TZ=UTC -- pnpm dlx @bytebase/dbhub --transport stdio --config "$HOME/projects/private/dbhub.private.toml"
+mcp_add dbhub --scope user --transport stdio dbhub --env TZ=UTC -- pnpm dlx @bytebase/dbhub --transport stdio --config "$HOME/projects/opine/dbhub.private.toml"
 
 # ClickHouse — one user-scoped server that adapts per worktree. The per-worktree
 # database (and any host overrides) arrive via mise-injected .env.agent, which wt
