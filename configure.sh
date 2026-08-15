@@ -10,19 +10,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # run_onchange_ script. lib/ssh-signing-key.sh is left in the tree unused so
 # reverting this commit restores the previous behavior.
 
-# Symlink db-worktree CLI to ~/.local/bin
-mkdir -p "$HOME/.local/bin"
-ln -sf "$SCRIPT_DIR/bin/db-worktree" "$HOME/.local/bin/db-worktree"
-ln -sf "$SCRIPT_DIR/bin/wt" "$HOME/.local/bin/wt"
-ln -sf "$SCRIPT_DIR/bin/pg" "$HOME/.local/bin/pg"
-ln -sf "$SCRIPT_DIR/bin/cmux-ws" "$HOME/.local/bin/cmux-ws"
-ln -sf "$SCRIPT_DIR/bin/syshealth" "$HOME/.local/bin/syshealth"
-ln -sf "$SCRIPT_DIR/bin/scope" "$HOME/.local/bin/scope"
-ln -sf "$SCRIPT_DIR/bin/swapsize" "$HOME/.local/bin/swapsize"
-ln -sf "$SCRIPT_DIR/bin/tsgo-shim" "$HOME/.local/bin/tsgo-shim"
-ln -sf "$SCRIPT_DIR/bin/env-init" "$HOME/.local/bin/env-init"
-ln -sf "$SCRIPT_DIR/bin/env-revert" "$HOME/.local/bin/env-revert"
-echo "Symlinked db-worktree, wt, pg, cmux-ws, syshealth, scope, swapsize, tsgo-shim, env-init, env-revert to ~/.local/bin/"
+# bin/ and its runtime lib/ dependencies moved to the aiwilliams/home repo as of
+# the Phase 3 cutover; chezmoi owns the ~/.local/bin symlinks. The installer
+# lib/*.sh files stay here — install-{macos,ubuntu}.sh still source postgres.sh
+# and clickhouse.sh, which now live in the home repo, so those two scripts are
+# broken until Phase 3 step 5 ports them to .chezmoiscripts/.
 
 # tmux config is managed by chezmoi (aiwilliams/home) as of the Phase 3 cutover.
 
