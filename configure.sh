@@ -48,5 +48,7 @@ echo "Installed pre-commit hook"
 # installed had been dangling since July, pointing at lib/AGENTS.md when the file
 # is at the repo root.
 
-# Claude Code MCP servers
-source "$SCRIPT_DIR/lib/claude-mcp.sh"
+# Claude Code MCP servers moved to the opine setup repo
+# (~/projects/opine/setup/claude-mcp.sh, run by its install.sh). They are
+# opine-only by design — the personal profile deliberately has none — so they
+# belong with the rest of the opine wiring rather than in a machine-wide script.
